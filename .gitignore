@@ -1,0 +1,46 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Secrets (local env) — never commit (.env pattern also covers client/.env)
+.env
+
+# Test / tooling caches & coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# TypeScript / Vite build info
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+*.log
+
+# OS noise
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor files (recommend keeping shared config: .vscode/extensions.json)
+.vscode/
+.idea/
+
+# Client is covered by client/.gitignore (node_modules, dist, logs, *.local);
+# entries below are belt-and-braces for the client/
+client/node_modules/
+client/dist/
+
+
+#some files which are private and up to me hahaha ....
+ARCHITECTURE (1).md
+PRODUCTION.md

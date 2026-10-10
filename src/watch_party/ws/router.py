@@ -21,7 +21,6 @@ class MessageRouter:
         self._handlers = {
             "join_room": connection.on_join_room,
             "pong": connection.on_pong,
-            "echo": connection.on_echo,
         }
 
     async def route(self, raw: str) -> None:

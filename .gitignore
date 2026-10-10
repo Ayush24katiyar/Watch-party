@@ -44,3 +44,6 @@ client/dist/
 #some files which are private and up to me hahaha ....
 ARCHITECTURE (1).md
 PRODUCTION.md
+CODE_AUDIT_AGENT.md
+AFTER_PHASE_4.md
+audit/

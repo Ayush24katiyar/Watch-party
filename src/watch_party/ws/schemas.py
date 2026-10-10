@@ -37,18 +37,9 @@ class PongMessage(BaseModel):
     payload: dict[str, Any]
 
 
-class EchoMessage(BaseModel):
-    """TEMPORARY dev-only event (8.2); removed at the end of Phase 2."""
-
-    model_config = _WIRE_CONFIG
-
-    type: Literal["echo"]
-    payload: dict[str, Any]
-
-
 # Discriminated union: the "type" field selects the schema (S-5).
 ClientMessage = Annotated[
-    JoinRoomMessage | PongMessage | EchoMessage,
+    JoinRoomMessage | PongMessage,
     Field(discriminator="type"),
 ]
 

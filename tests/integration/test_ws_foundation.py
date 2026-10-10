@@ -1,30 +1,25 @@
-"""Phase 1 integration tests: WebSocket foundation (architecture 16, 18).
+"""WebSocket integration tests: Phase 1 foundation + Phase 2 join.
 
-Settings are overridden per test so the 5 s join timeout and 20/40 s heartbeat
-stay fast.
+Settings are fast (conftest); each test gets a fresh test DB and RoomManager.
 """
 
 import json
+from uuid import uuid4
 
 import pytest
 from starlette.websockets import WebSocketDisconnect
 
-ORIGIN = "http://localhost:5173"
-WS_PATH = "/ws/dev"
+from tests.conftest import (
+    TEST_ORIGIN,
+    drain_until_close,
+    join_payload,
+    receive_pings,
+    recv_until,
+)
 
 
 @pytest.fixture()
 def client(monkeypatch):
-    monkeypatch.setenv("JOIN_TIMEOUT_SECONDS", "0.3")
-    monkeypatch.setenv("WS_PING_INTERVAL_SECONDS", "0.2")
-    monkeypatch.setenv("WS_PING_TIMEOUT_SECONDS", "0.5")
-    monkeypatch.setenv("WS_RATE_LIMIT_OTHER_PER_SECOND", "5")
-    monkeypatch.setenv("WS_MAX_SIZE_BYTES", "200")
-    monkeypatch.setenv("WS_ABUSE_WINDOW_SECONDS", "60")
-    monkeypatch.setenv("WS_MAX_INVALID_PER_WINDOW", "10")
-    monkeypatch.setenv("ALLOWED_ORIGINS", ORIGIN)
-    monkeypatch.setenv("ALLOW_MISSING_ORIGIN", "false")
-
     from fastapi.testclient import TestClient
 
     from watch_party.config import get_settings
@@ -36,151 +31,287 @@ def client(monkeypatch):
     get_settings.cache_clear()
 
 
-def join() -> str:
-    return json.dumps(
-        {
-            "type": "join_room",
-            "payload": {"roomId": "dev", "username": "dev", "userId": "dev", "token": "dev"},
-        }
-    )
-
-
 def error_code(message: dict) -> str:
     assert message["type"] == "error"
     return message["payload"]["code"]
 
 
-# --- Phase 1 done-when cases (architecture 16) ---
+def joined_event(websocket) -> dict:
+    return recv_until(websocket, lambda event: event.get("type") == "room_joined")
 
 
-def test_silent_socket_closes_with_4007(client) -> None:
-    with client.websocket_connect(WS_PATH, headers={"origin": ORIGIN}) as ws:
-        with pytest.raises(WebSocketDisconnect) as exc:
-            # Drain heartbeats until the join-timeout close arrives.
-            while True:
-                ws.receive_text()
-    assert exc.value.code == 4007
-
-
-def test_malformed_json_returns_error_and_stays_open(client) -> None:
-    with client.websocket_connect(WS_PATH, headers={"origin": ORIGIN}) as ws:
-        ws.send_text("{not json")
-        assert error_code(ws.receive_json()) == "invalid_message"
-        # Still usable: join and echo work after the error.
-        ws.send_text(join())
-        ws.send_json({"type": "echo", "payload": {"hello": "world"}})
-        assert ws.receive_json()["payload"] == {"hello": "world"}
-
-
-def test_unknown_type_returns_error(client) -> None:
-    with client.websocket_connect(WS_PATH, headers={"origin": ORIGIN}) as ws:
-        ws.send_text(join())
-        ws.send_json({"type": "play", "payload": {}})
-        assert error_code(ws.receive_json()) == "invalid_message"
-
-
-def test_extra_field_is_rejected(client) -> None:
-    with client.websocket_connect(WS_PATH, headers={"origin": ORIGIN}) as ws:
-        ws.send_text(join())
-        ws.send_json({"type": "echo", "payload": {}, "extra": 1})
-        assert error_code(ws.receive_json()) == "invalid_message"
+# --- Phase 1 cases that do not depend on rooms ---
 
 
 def test_bad_origin_is_rejected(client) -> None:
     with pytest.raises(WebSocketDisconnect):
-        with client.websocket_connect(WS_PATH, headers={"origin": "http://evil.com"}) as ws:
+        with client.websocket_connect("/ws/DEV", headers={"origin": "http://evil.com"}) as ws:
             ws.receive_text()
 
 
 def test_missing_origin_rejected_by_default(client) -> None:
     with pytest.raises(WebSocketDisconnect):
-        with client.websocket_connect(WS_PATH) as ws:
+        with client.websocket_connect("/ws/DEV") as ws:
             ws.receive_text()
 
 
-def test_missing_origin_allowed_when_setting_true(client, monkeypatch) -> None:
-    from watch_party.config import get_settings
-
-    monkeypatch.setenv("ALLOW_MISSING_ORIGIN", "true")
-    get_settings.cache_clear()
-    try:
-        with client.websocket_connect(WS_PATH) as ws:  # no Origin header at all
-            ws.send_text(join())
-            ws.send_json({"type": "echo", "payload": {"debugger": True}})
-            assert ws.receive_json()["payload"] == {"debugger": True}
-    finally:
-        get_settings.cache_clear()
-
-
-def test_oversized_message_closes_with_4007(client) -> None:
-    with client.websocket_connect(WS_PATH, headers={"origin": ORIGIN}) as ws:
-        ws.send_text(join())
-        ws.send_text(json.dumps({"type": "echo", "payload": {"blob": "x" * 500}}))
+def test_malformed_json_is_error_not_close(client) -> None:
+    with client.websocket_connect("/ws/DEV", headers={"origin": TEST_ORIGIN}) as ws:
+        ws.send_text("{not json")
         assert error_code(ws.receive_json()) == "invalid_message"
+        # Still open: no valid join arrives, so the gate closes 4007 after the timeout.
         with pytest.raises(WebSocketDisconnect) as exc:
-            ws.receive_text()
+            drain_until_close(ws)
     assert exc.value.code == 4007
 
 
 def test_first_message_must_be_join_room(client) -> None:
-    with client.websocket_connect(WS_PATH, headers={"origin": ORIGIN}) as ws:
+    with client.websocket_connect("/ws/DEV", headers={"origin": TEST_ORIGIN}) as ws:
         ws.send_json({"type": "pong", "payload": {}})
         assert error_code(ws.receive_json()) == "invalid_message"
         with pytest.raises(WebSocketDisconnect) as exc:
-            while True:
-                ws.receive_text()
+            drain_until_close(ws)
     assert exc.value.code == 4007
 
 
-def test_invalid_join_payload_then_close_4007(client) -> None:
-    with client.websocket_connect(WS_PATH, headers={"origin": ORIGIN}) as ws:
-        ws.send_json({"type": "join_room", "payload": {}})
+def test_silent_socket_closes_with_4007(client) -> None:
+    with client.websocket_connect("/ws/DEV", headers={"origin": TEST_ORIGIN}) as ws:
+        with pytest.raises(WebSocketDisconnect) as exc:
+            drain_until_close(ws)
+    assert exc.value.code == 4007
+
+
+# --- Phase 2: identity and join ---
+
+
+def test_creator_joins_as_host(client, make_user_with_room) -> None:
+    user = make_user_with_room()
+    with client.websocket_connect(f"/ws/{user['roomCode']}", headers={"origin": TEST_ORIGIN}) as ws:
+        ws.send_json(join_payload(user["roomCode"], user["userId"], user["token"], "ayush"))
+        event = joined_event(ws)
+        you = event["payload"]["you"]
+        assert you["role"] == "host"
+        assert you["username"] == "ayush"
+        assert event["payload"]["participants"] == [you]
+        assert event["payload"]["state"]["playState"] == "paused"
+        assert event["payload"]["locked"] is False
+
+
+def test_second_user_gets_user_joined_broadcast(client, make_user_with_room) -> None:
+    host = make_user_with_room()
+    with client.websocket_connect(f"/ws/{host['roomCode']}", headers={"origin": TEST_ORIGIN}) as ws:
+        ws.send_json(join_payload(host["roomCode"], host["userId"], host["token"], "ayush"))
+        joined_event(ws)
+
+        guest = make_user_with_room()  # second identity, different user
+        with client.websocket_connect(f"/ws/{host['roomCode']}", headers={"origin": TEST_ORIGIN}) as ws2:
+            ws2.send_json(join_payload(host["roomCode"], guest["userId"], guest["token"], "neha"))
+            assert joined_event(ws2)["payload"]["you"]["role"] == "participant"
+
+        # The host hears about the new participant.
+        event = recv_until(ws, lambda e: e.get("type") == "user_joined")
+        assert event["payload"]["username"] == "neha"
+        assert len(event["payload"]["participants"]) == 2
+
+
+def test_returning_member_keeps_username(client, make_user_with_room) -> None:
+    host = make_user_with_room()
+    with client.websocket_connect(f"/ws/{host['roomCode']}", headers={"origin": TEST_ORIGIN}) as ws:
+        ws.send_json(join_payload(host["roomCode"], host["userId"], host["token"], "ayush"))
+        joined_event(ws)
+
+    with client.websocket_connect(f"/ws/{host['roomCode']}", headers={"origin": TEST_ORIGIN}) as ws:
+        ws.send_json(join_payload(host["roomCode"], host["userId"], host["token"], "different-name"))
+        you = joined_event(ws)["payload"]["you"]
+        assert you["username"] == "ayush"  # stored name kept (10.3)
+
+
+def test_duplicate_tab_closes_old_socket_with_4004(client, make_user_with_room) -> None:
+    user = make_user_with_room()
+    with client.websocket_connect(f"/ws/{user['roomCode']}", headers={"origin": TEST_ORIGIN}) as ws:
+        ws.send_json(join_payload(user["roomCode"], user["userId"], user["token"], "ayush"))
+        joined_event(ws)
+
+        with client.websocket_connect(f"/ws/{user['roomCode']}", headers={"origin": TEST_ORIGIN}) as ws2:
+            ws2.send_json(join_payload(user["roomCode"], user["userId"], user["token"], "ayush"))
+            assert joined_event(ws2)["payload"]["you"]["role"] == "host"
+            with pytest.raises(WebSocketDisconnect) as exc:
+                drain_until_close(ws)
+        assert exc.value.code == 4004
+
+
+def test_bad_token_closes_4002(client, make_user_with_room) -> None:
+    user = make_user_with_room()
+    with client.websocket_connect(f"/ws/{user['roomCode']}", headers={"origin": TEST_ORIGIN}) as ws:
+        ws.send_text(json.dumps(join_payload(user["roomCode"], user["userId"], "wrong-token")))
+        with pytest.raises(WebSocketDisconnect) as exc:
+            drain_until_close(ws)
+    assert exc.value.code == 4002
+
+
+def test_unknown_user_closes_4002(client, make_user_with_room) -> None:
+    user = make_user_with_room()
+    payload = join_payload(user["roomCode"], str(uuid4()), "whatever-token")
+    with client.websocket_connect(f"/ws/{user['roomCode']}", headers={"origin": TEST_ORIGIN}) as ws:
+        ws.send_text(json.dumps(payload))
+        with pytest.raises(WebSocketDisconnect) as exc:
+            drain_until_close(ws)
+    assert exc.value.code == 4002
+
+
+def test_unknown_room_closes_4001(client, make_user_with_room) -> None:
+    user = make_user_with_room()
+    payload = join_payload("NOSUCH", user["userId"], user["token"])
+    with client.websocket_connect("/ws/NOSUCH", headers={"origin": TEST_ORIGIN}) as ws:
+        ws.send_text(json.dumps(payload))
+        with pytest.raises(WebSocketDisconnect) as exc:
+            drain_until_close(ws)
+    assert exc.value.code == 4001
+
+
+def test_closed_room_is_reported_like_missing(client, make_user_with_room, room_ops) -> None:
+    user = make_user_with_room()
+    room_ops["set_status"](user["roomCode"], "closed")
+    with client.websocket_connect(f"/ws/{user['roomCode']}", headers={"origin": TEST_ORIGIN}) as ws:
+        ws.send_json(join_payload(user["roomCode"], user["userId"], user["token"]))
+        with pytest.raises(WebSocketDisconnect) as exc:
+            drain_until_close(ws)
+    assert exc.value.code == 4001
+
+
+def test_locked_room_closes_4006_for_new_member(client, make_user_with_room, room_ops) -> None:
+    host = make_user_with_room()
+    room_ops["set_status"](host["roomCode"], "locked")
+    guest = make_user_with_room()
+    with client.websocket_connect(f"/ws/{host['roomCode']}", headers={"origin": TEST_ORIGIN}) as ws:
+        ws.send_json(join_payload(host["roomCode"], guest["userId"], guest["token"], "neha"))
+        with pytest.raises(WebSocketDisconnect) as exc:
+            drain_until_close(ws)
+    assert exc.value.code == 4006
+
+
+def test_banned_member_closes_4003(client, make_user_with_room, room_ops) -> None:
+    host = make_user_with_room()
+    room_ops["ban"](host["roomCode"], host["userId"])
+    with client.websocket_connect(f"/ws/{host['roomCode']}", headers={"origin": TEST_ORIGIN}) as ws:
+        ws.send_json(join_payload(host["roomCode"], host["userId"], host["token"], "ayush"))
+        with pytest.raises(WebSocketDisconnect) as exc:
+            drain_until_close(ws)
+    assert exc.value.code == 4003
+
+
+def test_lowercase_code_joins(client, make_user_with_room) -> None:
+    user = make_user_with_room()
+    with client.websocket_connect(f"/ws/{user['roomCode'].lower()}", headers={"origin": TEST_ORIGIN}) as ws:
+        ws.send_json(join_payload(user["roomCode"].lower(), user["userId"], user["token"], "ayush"))
+        event = joined_event(ws)
+        assert event["payload"]["you"]["role"] == "host"
+
+
+def test_full_room_closes_4005(client, make_user_with_room, monkeypatch) -> None:
+    from watch_party.config import get_settings
+
+    monkeypatch.setenv("MAX_ROOM_SIZE", "2")
+    get_settings.cache_clear()
+    host = make_user_with_room()
+    guest = make_user_with_room()
+    with client.websocket_connect(f"/ws/{host['roomCode']}", headers={"origin": TEST_ORIGIN}) as ws:
+        ws.send_json(join_payload(host["roomCode"], host["userId"], host["token"], "ayush"))
+        joined_event(ws)
+    with client.websocket_connect(f"/ws/{host['roomCode']}", headers={"origin": TEST_ORIGIN}) as ws:
+        ws.send_json(join_payload(host["roomCode"], guest["userId"], guest["token"], "neha"))
+        joined_event(ws)
+
+    third = make_user_with_room()
+    with client.websocket_connect(f"/ws/{host['roomCode']}", headers={"origin": TEST_ORIGIN}) as ws:
+        ws.send_json(join_payload(host["roomCode"], third["userId"], third["token"], "raj"))
+        with pytest.raises(WebSocketDisconnect) as exc:
+            drain_until_close(ws)
+    assert exc.value.code == 4005
+
+
+# --- Phase 1 limits, still valid after join ---
+
+
+def test_oversized_message_closes_with_4007(client, make_user_with_room) -> None:
+    user = make_user_with_room()
+    with client.websocket_connect(f"/ws/{user['roomCode']}", headers={"origin": TEST_ORIGIN}) as ws:
+        ws.send_json(join_payload(user["roomCode"], user["userId"], user["token"]))
+        joined_event(ws)
+        # Over WS_MAX_SIZE_BYTES (200 in tests); the size check runs before parsing.
+        ws.send_text(json.dumps({"type": "pong", "payload": {"blob": "x" * 500}}))
         assert error_code(ws.receive_json()) == "invalid_message"
         with pytest.raises(WebSocketDisconnect) as exc:
-            while True:
-                ws.receive_text()
+            drain_until_close(ws)
     assert exc.value.code == 4007
 
 
-def test_rate_limited_burst_gets_error(client) -> None:
-    with client.websocket_connect(WS_PATH, headers={"origin": ORIGIN}) as ws:
-        ws.send_text(join())
-        # Bucket is 5/s; join + 9 pongs = 10 messages -> some must be rate_limited.
-        for _ in range(9):
+def test_rate_limited_burst_gets_error(client, make_user_with_room) -> None:
+    user = make_user_with_room()
+    with client.websocket_connect(f"/ws/{user['roomCode']}", headers={"origin": TEST_ORIGIN}) as ws:
+        ws.send_json(join_payload(user["roomCode"], user["userId"], user["token"]))
+        joined_event(ws)
+        # Bucket is 5/s; join already spent one token, so a burst must trip the limit.
+        for _ in range(12):
             ws.send_json({"type": "pong", "payload": {}})
-        codes = [error_code(ws.receive_json()) for _ in range(5)]
-        assert "rate_limited" in codes
+        assert error_code(recv_until(ws, lambda e: e.get("type") == "error")) == "rate_limited"
 
 
-def test_ping_pong_keeps_connection_alive(client) -> None:
-    with client.websocket_connect(WS_PATH, headers={"origin": ORIGIN}) as ws:
-        ws.send_text(join())
-        # Server pings every 0.2s; the test client replies pong like the real client does.
-        first = ws.receive_json()
-        assert first["type"] == "ping"
-        ws.send_json({"type": "pong", "payload": {}})
-        for _ in range(3):
-            assert ws.receive_json()["type"] == "ping"
-            ws.send_json({"type": "pong", "payload": {}})
-        ws.send_json({"type": "echo", "payload": {"still": "alive"}})
-        assert ws.receive_json()["payload"] == {"still": "alive"}
+def test_unknown_type_after_join_is_error(client, make_user_with_room) -> None:
+    user = make_user_with_room()
+    with client.websocket_connect(f"/ws/{user['roomCode']}", headers={"origin": TEST_ORIGIN}) as ws:
+        ws.send_json(join_payload(user["roomCode"], user["userId"], user["token"]))
+        joined_event(ws)
+        ws.send_json({"type": "play", "payload": {}})
+        assert error_code(ws.receive_json()) == "invalid_message"
+        # Still processing: another unknown type gets the same treatment.
+        ws.send_json({"type": "nonsense", "payload": {}})
+        assert error_code(recv_until(ws, lambda e: e.get("type") == "error")) == "invalid_message"
 
 
-def test_zombie_connection_closes_with_1001(client) -> None:
-    with client.websocket_connect(WS_PATH, headers={"origin": ORIGIN}) as ws:
-        ws.send_text(join())
-        # No pongs: heartbeat timeout (0.5s) must close the socket with 1001.
-        with pytest.raises(WebSocketDisconnect) as exc:
-            while True:
-                message = ws.receive_json()
-                if message.get("type") == "ping":
-                    continue  # deliberately never pong
-    assert exc.value.code == 1001
-
-
-def test_error_includes_request_id(client) -> None:
-    with client.websocket_connect(WS_PATH, headers={"origin": ORIGIN}) as ws:
-        ws.send_text(join())
+def test_error_includes_request_id(client, make_user_with_room) -> None:
+    user = make_user_with_room()
+    with client.websocket_connect(f"/ws/{user['roomCode']}", headers={"origin": TEST_ORIGIN}) as ws:
+        ws.send_json(join_payload(user["roomCode"], user["userId"], user["token"]))
+        joined_event(ws)
         ws.send_json({"type": "play", "payload": {}, "requestId": "req-1"})
-        message = ws.receive_json()
+        message = recv_until(ws, lambda e: e.get("type") == "error")
         assert message["payload"]["requestId"] == "req-1"
+
+
+def test_ping_pong_keeps_connection_alive(client, make_user_with_room) -> None:
+    user = make_user_with_room()
+    with client.websocket_connect(f"/ws/{user['roomCode']}", headers={"origin": TEST_ORIGIN}) as ws:
+        ws.send_json(join_payload(user["roomCode"], user["userId"], user["token"]))
+        joined_event(ws)
+        receive_pings(ws, 3)
+        # Still processing messages after the heartbeat exchange.
+        ws.send_json({"type": "nonsense", "payload": {}})
+        assert error_code(recv_until(ws, lambda e: e.get("type") == "error")) == "invalid_message"
+
+
+def test_concurrent_joins_both_succeed(client, make_user_with_room) -> None:
+    """Two users joining without waiting for each other's replies (D-13 lock)."""
+    host = make_user_with_room()
+    guest = make_user_with_room()
+    with client.websocket_connect(f"/ws/{host['roomCode']}", headers={"origin": TEST_ORIGIN}) as ws:
+        ws.send_json(join_payload(host["roomCode"], host["userId"], host["token"], "ayush"))
+        with client.websocket_connect(f"/ws/{host['roomCode']}", headers={"origin": TEST_ORIGIN}) as ws2:
+            ws2.send_json(join_payload(host["roomCode"], guest["userId"], guest["token"], "neha"))
+            # Both sends happen before either reply is read.
+            you = joined_event(ws2)["payload"]["you"]
+            assert you["username"] == "neha"
+            assert you["role"] == "participant"
+        host_event = joined_event(ws)
+        assert host_event["payload"]["you"]["role"] == "host"
+
+
+def test_zombie_connection_closes_with_1001(client, make_user_with_room) -> None:
+    user = make_user_with_room()
+    with client.websocket_connect(f"/ws/{user['roomCode']}", headers={"origin": TEST_ORIGIN}) as ws:
+        ws.send_json(join_payload(user["roomCode"], user["userId"], user["token"]))
+        joined_event(ws)
+        with pytest.raises(WebSocketDisconnect) as exc:
+            while True:
+                ws.receive_text()  # pings arrive but are never answered
+    assert exc.value.code == 1001

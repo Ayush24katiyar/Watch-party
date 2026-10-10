@@ -28,6 +28,62 @@ body {
   color: var(--text-h);
 }
 
+.home label {
+  display: block;
+  margin: 12px 0;
+  font-size: 14px;
+}
+
+.home input {
+  display: block;
+  margin-top: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+}
+
+.actions {
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.join-form {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.home button {
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  cursor: pointer;
+}
+
+.error {
+  color: #b42318;
+}
+
+.dev-panel {
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+.dev-panel h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  color: var(--text-h);
+}
+
 .dev-panel {
   margin-top: 24px;
   padding: 16px;

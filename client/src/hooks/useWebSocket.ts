@@ -16,15 +16,17 @@ export type WebSocketHandle = {
   status: ConnectionStatus;
   /** Set after a terminal (no-retry) close or an exhausted retry. */
   closeInfo: { code: number; reason: string } | null;
-  /** Payload of the most recent temporary dev-only `echo` response. */
-  lastEcho: Record<string, unknown> | null;
+  /** Most recent server event (ping/echo/error/room_joined/...). */
+  lastEvent: { type: string; payload: Record<string, unknown> } | null;
   send: (event: { type: string; payload: Record<string, unknown> }) => void;
 };
 
 export function useWebSocket(url: string): WebSocketHandle {
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [closeInfo, setCloseInfo] = useState<{ code: number; reason: string } | null>(null);
-  const [lastEcho, setLastEcho] = useState<Record<string, unknown> | null>(null);
+  const [lastEvent, setLastEvent] = useState<{ type: string; payload: Record<string, unknown> } | null>(
+    null,
+  );
 
   const socketRef = useRef<WebSocket | null>(null);
   const queueRef = useRef<string[]>([]);
@@ -58,13 +60,12 @@ export function useWebSocket(url: string): WebSocketHandle {
       } catch {
         return;
       }
+      setLastEvent({ type: parsed.type ?? "", payload: parsed.payload ?? {} });
       if (parsed.type === "ping") {
         // Reply to the server heartbeat (10.6).
         socket.send(JSON.stringify({ type: "pong", payload: {} }));
-      } else if (parsed.type === "echo") {
-        setLastEcho(parsed.payload ?? {});
       }
-      // `error` events are surfaced via the dev panel's raw output.
+      // Other events are surfaced through lastEvent.
     };
 
     socket.onclose = (event: CloseEvent) => {
@@ -118,5 +119,5 @@ export function useWebSocket(url: string): WebSocketHandle {
     }
   }, []);
 
-  return { status, closeInfo, lastEcho, send };
+  return { status, closeInfo, lastEvent, send };
 }

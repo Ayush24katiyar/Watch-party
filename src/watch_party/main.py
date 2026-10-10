@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from watch_party.api.routes import router as api_router
 from watch_party.config import get_settings
 from watch_party.db.engine import engine
 from watch_party.ws.endpoint import router as ws_router
@@ -33,6 +34,8 @@ def create_app() -> FastAPI:
 
     # Phase 1+: WebSocket foundation (/ws/{code}).
     app.include_router(ws_router)
+    # Phase 2: identity and rooms over REST.
+    app.include_router(api_router)
 
     return app
 

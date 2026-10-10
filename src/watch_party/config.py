@@ -24,8 +24,20 @@ class Settings(BaseSettings):
     # Per-connection abuse limits: sustained violations close the socket (S-5, S-7).
     ws_max_invalid_per_window: int = 10
     ws_abuse_window_seconds: float = 60.0
+    # Every join-path DB call is bounded so a hung query cannot hold the room lock (R-6).
+    ws_db_timeout_seconds: float = 5.0
     # Origin policy (S-3). False = reject a missing Origin header; true is local-only.
     allow_missing_origin: bool = False
+
+    # Rooms and REST rate limits (Phase 2: 8.1, S-8, S-9).
+    max_room_size: int = 20
+    max_live_rooms_per_user: int = 3
+    rest_rate_limit_per_minute: float = 30.0
+    room_creation_rate_limit_per_minute: float = 5.0
+
+    # Tests run the same engine from several event loops (sync tests via anyio.run
+    # plus the TestClient portal); NullPool avoids cross-loop connection reuse.
+    db_null_pool: bool = False
 
     @field_validator("allowed_origins", mode="before")
     @classmethod

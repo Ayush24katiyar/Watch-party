@@ -24,6 +24,11 @@ body {
   padding: 48px 16px;
 }
 
+/* The room page is video-first: give the player real width. */
+.home.room-wide {
+  max-width: 1100px;
+}
+
 .home h1 {
   color: var(--text-h);
 }
@@ -82,6 +87,262 @@ body {
   margin: 0 0 8px;
   font-size: 14px;
   color: var(--text-h);
+}
+
+.participants {
+  margin-top: 16px;
+}
+
+.participants h2 {
+  font-size: 16px;
+  color: var(--text-h);
+}
+
+.participants ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.participants li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.dot.online {
+  background: #12a150;
+}
+
+.dot.offline {
+  background: #b6b3bd;
+}
+
+.participants .name {
+  flex: 1;
+}
+
+.role {
+  font-size: 12px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+}
+
+.role-host {
+  background: var(--accent-bg, rgba(170, 59, 255, 0.1));
+  border-color: var(--accent);
+}
+
+.notice {
+  color: #8a6100;
+}
+
+.participants-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.host-actions {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.host-actions button {
+  padding: 2px 8px;
+  font-size: 12px;
+  background: transparent;
+  color: var(--text-h);
+}
+
+/* Player area (Phase 5) */
+.player-area {
+  margin-top: 16px;
+  width: 100%;
+}
+
+.youtube-player {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #000;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+/* The mount div fills the box so the iframe can fill it too. */
+.youtube-mount {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.youtube-mount > div {
+  width: 100%;
+  height: 100%;
+}
+
+.youtube-player iframe {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+.player-overlay {
+  position: absolute;
+  inset: 0;
+}
+
+.player-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: #fff;
+}
+
+.control-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.control-bar .control-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.control-bar .control-row input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+}
+
+.control-bar .change-video button {
+  white-space: nowrap;
+}
+
+.control-bar .seek-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 14px;
+}
+
+.control-bar .seek-label input {
+  flex: 1;
+  padding: 0;
+}
+
+.control-bar.disabled {
+  opacity: 0.7;
+}
+
+.control-bar .time {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-h);
+}
+
+/* Request picker + panel (Phase 6) */
+.request-picker,
+.requests-panel {
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.request-picker label,
+.request-picker select,
+.request-picker input {
+  margin-right: 8px;
+}
+
+.requests-panel ul {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.requests-panel li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.requests-panel li span {
+  flex: 1;
+}
+
+/* Chat (Phase 7) */
+.chat-panel {
+  max-width: 1100px;
+  margin-top: 16px;
+  padding: 12px 16px 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+}
+
+.chat-panel h2 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-h);
+}
+
+.chat-messages {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  min-height: 60px;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.chat-messages li {
+  padding: 3px 0;
+  font-size: 14px;
+  word-break: break-word;
+}
+
+.chat-form {
+  display: flex;
+  gap: 8px;
+}
+
+.chat-form input {
+  flex: 1;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
 }
 
 .dev-panel {

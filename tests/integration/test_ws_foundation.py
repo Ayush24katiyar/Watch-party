@@ -18,19 +18,6 @@ from tests.conftest import (
 )
 
 
-@pytest.fixture()
-def client(monkeypatch):
-    from fastapi.testclient import TestClient
-
-    from watch_party.config import get_settings
-    from watch_party.main import create_app
-
-    get_settings.cache_clear()
-    with TestClient(create_app()) as test_client:
-        yield test_client
-    get_settings.cache_clear()
-
-
 def error_code(message: dict) -> str:
     assert message["type"] == "error"
     return message["payload"]["code"]
@@ -238,9 +225,9 @@ def test_oversized_message_closes_with_4007(client, make_user_with_room) -> None
     with client.websocket_connect(f"/ws/{user['roomCode']}", headers={"origin": TEST_ORIGIN}) as ws:
         ws.send_json(join_payload(user["roomCode"], user["userId"], user["token"]))
         joined_event(ws)
-        # Over WS_MAX_SIZE_BYTES (200 in tests); the size check runs before parsing.
-        ws.send_text(json.dumps({"type": "pong", "payload": {"blob": "x" * 500}}))
-        assert error_code(ws.receive_json()) == "invalid_message"
+        # Over WS_MAX_SIZE_BYTES (1024 in tests); the size check runs before parsing.
+        ws.send_text(json.dumps({"type": "pong", "payload": {"blob": "x" * 2000}}))
+        assert error_code(recv_until(ws, lambda e: e.get("type") == "error")) == "invalid_message"
         with pytest.raises(WebSocketDisconnect) as exc:
             drain_until_close(ws)
     assert exc.value.code == 4007
@@ -262,8 +249,8 @@ def test_unknown_type_after_join_is_error(client, make_user_with_room) -> None:
     with client.websocket_connect(f"/ws/{user['roomCode']}", headers={"origin": TEST_ORIGIN}) as ws:
         ws.send_json(join_payload(user["roomCode"], user["userId"], user["token"]))
         joined_event(ws)
-        ws.send_json({"type": "play", "payload": {}})
-        assert error_code(ws.receive_json()) == "invalid_message"
+        ws.send_json({"type": "dance", "payload": {}})
+        assert error_code(recv_until(ws, lambda e: e.get("type") == "error")) == "invalid_message"
         # Still processing: another unknown type gets the same treatment.
         ws.send_json({"type": "nonsense", "payload": {}})
         assert error_code(recv_until(ws, lambda e: e.get("type") == "error")) == "invalid_message"
@@ -274,8 +261,9 @@ def test_error_includes_request_id(client, make_user_with_room) -> None:
     with client.websocket_connect(f"/ws/{user['roomCode']}", headers={"origin": TEST_ORIGIN}) as ws:
         ws.send_json(join_payload(user["roomCode"], user["userId"], user["token"]))
         joined_event(ws)
-        ws.send_json({"type": "play", "payload": {}, "requestId": "req-1"})
+        ws.send_json({"type": "seek", "payload": {"time": -1}, "requestId": "req-1"})
         message = recv_until(ws, lambda e: e.get("type") == "error")
+        assert message["payload"]["code"] == "invalid_message"
         assert message["payload"]["requestId"] == "req-1"
 
 

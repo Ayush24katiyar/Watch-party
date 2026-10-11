@@ -25,13 +25,18 @@ from watch_party.domain.room import Room
 from watch_party.domain.room_manager import room_manager
 from watch_party.domain.roles import Role
 from watch_party.domain.usernames import unique_username
+from watch_party.logging import get_logger
+from watch_party.repositories import chat as chat_repo
 from watch_party.repositories import members as member_repo
 from watch_party.repositories import rooms as room_repo
 from watch_party.repositories import users as user_repo
+from watch_party.ws.handlers import roles as role_handlers
 from watch_party.ws.router import MessageRouter
 from watch_party.ws.schemas import JoinRoomPayload, client_message_adapter
 
 router = APIRouter()
+
+logger = get_logger()
 
 # The room creator's member row gets this placeholder until their first join.
 ROOM_CREATOR_PLACEHOLDER = "host"
@@ -52,15 +57,31 @@ class Connection:
         self.code = code
         self._settings = settings
         self._router = MessageRouter(self)
+        room_manager.register_connection(self)
         self._joined = False
         self._closing = False
         self._last_pong = time.monotonic()
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._bucket = TokenBucket(settings.ws_rate_limit_other_per_second)
+        # S-7: chat and reactions get their own, tighter buckets.
+        self._chat_bucket = TokenBucket(settings.chat_rate_limit_per_second)
+        self._reaction_bucket = TokenBucket(settings.reaction_rate_limit_per_second)
         self._invalid_times: list[float] = []
         self._rate_limited_times: list[float] = []
         self.room: Room | None = None
         self.you: Participant | None = None
+
+    @property
+    def chat_bucket(self):
+        return self._chat_bucket
+
+    @property
+    def reaction_bucket(self):
+        return self._reaction_bucket
+
+    @property
+    def settings(self) -> Settings:
+        return self._settings
 
     # ---- lifecycle ----
 
@@ -80,7 +101,7 @@ class Connection:
             pass
         finally:
             await self._shutdown()
-            self._detach()
+            await self._depart()
 
     async def _join_gate(self) -> None:
         """Wait for a valid join_room. Malformed / wrong-type input is an error,
@@ -121,6 +142,10 @@ class Connection:
 
         self.room = room
         self.you = you
+        recent_chat: list[dict[str, Any]] = []
+        if room.db_id is not None:
+            async with SessionLocal() as session:
+                recent_chat = await chat_repo.recent_messages(session, room.db_id)
         await self.send(
             {
                 "type": "room_joined",
@@ -129,8 +154,18 @@ class Connection:
                     "participants": room.participant_snapshots(),
                     "state": room.state_snapshot(),
                     "locked": room.locked,
-                    "pendingRequests": [],
-                    "recentChat": [],
+                    "pendingRequests": [
+                            {
+                                "requestId": request["requestId"],
+                                "userId": request["user_id"],
+                                "username": request["username"],
+                                "action": request["action"],
+                                "payload": request["payload"],
+                                "expiresAt": request["expiresAt"],
+                            }
+                            for request in room.pending_requests.values()
+                        ],
+                    "recentChat": recent_chat,
                 },
             }
         )
@@ -147,6 +182,11 @@ class Connection:
             exclude_user_id=you.user_id,
         )
         self._joined = True
+        # Someone is online again: any empty-room timer is void (10.5).
+        room_manager.cancel_cleanup(room)
+        # A returning host cancels their own grace period (D-15).
+        if you.user_id == room.host_user_id:
+            room_manager.cancel_host_grace(room)
 
     async def _authenticate(self, payload: JoinRoomPayload) -> UUID | None:
         """S-1: the token proves identity; a self-reported userId is never trusted."""
@@ -157,7 +197,7 @@ class Connection:
             await self.close(4002)
             return None
         async with SessionLocal() as session:
-            authorized = await self._db(user_repo.verify_token(session, user_id, payload.token))
+            authorized = await self.run_db(user_repo.verify_token(session, user_id, payload.token))
         if not authorized:
             await self.reject("unauthorized", "Authentication failed.")
             await self.close(4002)
@@ -173,7 +213,7 @@ class Connection:
             await self.close(4001)
             return None
         async with SessionLocal() as session:
-            member_row = await self._db(member_repo.get_member(session, room.db_id, user_id))
+            member_row = await self.run_db(member_repo.get_member(session, room.db_id, user_id))
         if member_row is not None and member_row.is_banned:
             await self.reject("forbidden", "You were removed from this room.")
             await self.close(4003)
@@ -206,7 +246,7 @@ class Connection:
         chosen = unique_username(username, [p.username for p in room if p.user_id != member.user_id])
         member.username = chosen
         async with SessionLocal() as session:
-            await self._db(
+            await self.run_db(
                 member_repo.update_username(session, room.db_id, UUID(member.user_id), chosen)
             )
 
@@ -223,10 +263,10 @@ class Connection:
             await self.close(4005)
             return None
         username = unique_username(payload.username, [p.username for p in room])
-        participant = Participant(str(user_id), username, Role.PARTICIPANT, time.monotonic())
+        participant = Participant(str(user_id), username, Role.PARTICIPANT, time.time())
         room.add(participant)
         async with SessionLocal() as session:
-            await self._db(member_repo.add_member(session, room.db_id, user_id, username))
+            await self.run_db(member_repo.add_member(session, room.db_id, user_id, username))
         return participant
 
     async def _handle_duplicate_connection(self, participant: Participant) -> None:
@@ -240,11 +280,21 @@ class Connection:
         room = room_manager.get(code)
         if room is not None:
             return room
+        # B-010: serialize restores per code. Without this, two users joining the
+        # same DB-backed room at once both miss the cache, both build a Room from
+        # the snapshot, and the second register() discards the first's members.
+        async with room_manager.restore_lock(code):
+            room = room_manager.get(code)
+            if room is not None:
+                return room  # the other join finished first; reuse its room
+            return await self._build_room(code)
+
+    async def _build_room(self, code: str) -> Room | None:
         async with SessionLocal() as session:
-            db_room = await self._db(room_repo.get_live_room_by_code(session, code))
+            db_room = await self.run_db(room_repo.get_live_room_by_code(session, code))
             if db_room is None:
                 return None
-            rows = await self._db(member_repo.get_members(session, db_room.id))
+            rows = await self.run_db(member_repo.get_members(session, db_room.id))
             members = [
                 {
                     "user_id": str(row.user_id),
@@ -303,6 +353,99 @@ class Connection:
     async def on_pong(self, payload: dict[str, Any], request_id: str | None) -> None:
         self._last_pong = time.monotonic()
 
+    async def on_leave_room(self, payload: dict[str, Any], request_id: str | None) -> None:
+        """10.3: intentional leave - announce, reassign host immediately, close cleanly."""
+        await self._depart(intentional=True)
+        self.room = None
+        self.you = None
+        await self.close(1000)
+
+    # ---- departure (Phase 3/4) ----
+
+    async def _depart(self, intentional: bool = False) -> None:
+        """Membership persists offline (10.3): detach, announce `user_left`, handle a
+        departing host (grace vs immediate, D-15), and schedule empty-room cleanup (10.5).
+        Skipped when a newer connection replaced this one (D-14)."""
+        room, you = self.room, self.you
+        if room is None or you is None:
+            return
+        if you.connection is not self:
+            return
+        you.connection = None
+        if self._joined:
+            await room.broadcast(
+                {
+                    "type": "user_left",
+                    "payload": {
+                        "username": you.username,
+                        "userId": you.user_id,
+                        "participants": room.participant_snapshots(),
+                    },
+                }
+            )
+        if self._joined and you.role == Role.HOST:
+            await self._handle_host_departure(room, intentional)
+        self._maybe_schedule_cleanup(room)
+
+    async def _handle_host_departure(self, room: Room, intentional: bool) -> None:
+        """D-15/10.3: a page refresh must not cost host status, so an unexpected
+        disconnect starts the grace timer; an intentional leave reassigns at once."""
+        if intentional:
+            await role_handlers.reassign_host(self)
+            return
+        room_manager.schedule_host_grace(
+            room,
+            self._settings.host_grace_seconds,
+            lambda _room: role_handlers.reassign_host(self),
+        )
+
+    def _maybe_schedule_cleanup(self, room: Room) -> None:
+        if room.has_online_participants():
+            room_manager.cancel_cleanup(room)
+            return
+        room_manager.schedule_cleanup(
+            room, self._settings.empty_room_ttl_seconds, self._on_room_expired
+        )
+
+    # ---- playback snapshots (D-22) ----
+
+    def schedule_snapshot(self, room: Room) -> None:
+        """Debounced: rapid playback changes coalesce into one DB write."""
+        room_manager.schedule_snapshot(
+            room, self._settings.playback_debounce_seconds, self._save_snapshot
+        )
+
+    async def _save_snapshot(self, room: Room) -> None:
+        if room.db_id is None:
+            return
+        state = room.video_state
+        try:
+            async with SessionLocal() as session:
+                await self.run_db(
+                    room_repo.save_state_snapshot(
+                        session,
+                        room.db_id,
+                        state["video_id"],
+                        state["play_state"],
+                        state["position"],
+                        state["seq"],
+                    )
+                )
+        except (TimeoutError, OSError):
+            pass  # a later state change will retry the snapshot
+
+    async def _on_room_expired(self, room: Room) -> None:
+        """10.5: empty for the TTL -> closed in the DB and dropped from memory."""
+        if room.db_id is not None:
+            try:
+                async with SessionLocal() as session:
+                    await self.run_db(room_repo.set_room_status(session, room.db_id, "closed"))
+            except (TimeoutError, OSError):
+                pass  # DB unreachable: still forget; a later join restores from the DB row
+        # 8.3: tell any remaining connections, then close.
+        await room.broadcast({"type": "room_closed", "payload": {"reason": "empty"}})
+        room_manager.forget(room.code)
+
     # ---- wire helpers ----
 
     async def send(self, event: dict[str, Any]) -> None:
@@ -331,15 +474,8 @@ class Connection:
         except (WebSocketDisconnect, RuntimeError):
             pass
 
-    def _detach(self) -> None:
-        """Leaving the socket does not remove membership (10.3): the participant
-        simply goes offline."""
-        if self.room is None or self.you is None:
-            return
-        if self.you.connection is self:
-            self.you.connection = None
-
     async def _shutdown(self) -> None:
+        room_manager.unregister_connection(self)
         if self._heartbeat_task is not None:
             self._heartbeat_task.cancel()
             try:
@@ -367,8 +503,8 @@ class Connection:
 
     # ---- helpers ----
 
-    async def _db(self, coro: Any) -> Any:
-        """Bound every DB call (R-6): a hung query must not hold the room lock."""
+    async def run_db(self, coro: Any) -> Any:
+        """Bound every DB call (R-6); public so handlers can use it: a hung query must not hold the room lock."""
         return await asyncio.wait_for(coro, timeout=self._settings.ws_db_timeout_seconds)
 
     def _count_recent(self, times: list[float]) -> int:
@@ -379,10 +515,17 @@ class Connection:
 @router.websocket("/ws/{code}")
 async def websocket_endpoint(websocket: WebSocket, code: str) -> None:
     settings = get_settings()
+    client = f"{websocket.client.host}:{websocket.client.port}" if websocket.client else "unknown"
+    logger.info("WS /ws/%s upgrade requested (client=%s)", code.upper(), client)
     if not _origin_allowed(websocket.headers.get("origin"), settings):
         # Reject before accept: denied upgrade (HTTP 403), no socket is opened (S-3).
+        logger.warning("WS /ws/%s rejected: bad origin", code.upper())
         await websocket.close(code=1008)
         return
 
     await websocket.accept()
-    await Connection(websocket, code, settings).run()
+    logger.info("WS /ws/%s accepted (client=%s)", code.upper(), client)
+    try:
+        await Connection(websocket, code, settings).run()
+    finally:
+        logger.info("WS /ws/%s connection closed (client=%s)", code.upper(), client)

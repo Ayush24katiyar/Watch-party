@@ -1,15 +1,5 @@
+from tests.conftest import FakeClock
 from watch_party.domain.rate_limit import TokenBucket
-
-
-class FakeClock:
-    def __init__(self) -> None:
-        self.now = 0.0
-
-    def __call__(self) -> float:
-        return self.now
-
-    def advance(self, seconds: float) -> None:
-        self.now += seconds
 
 
 def test_allows_burst_up_to_capacity() -> None:

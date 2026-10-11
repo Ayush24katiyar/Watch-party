@@ -85,6 +85,15 @@ async def set_room_status(session: AsyncSession, room_id: uuid.UUID, status: str
     await session.commit()
 
 
+async def set_room_host(session: AsyncSession, room_id: uuid.UUID, new_host_id: uuid.UUID) -> None:
+    """Reassign the host column (10.4). Role rows are updated separately."""
+    room = await session.get(Room, room_id)
+    if room is None:
+        return
+    room.host_user_id = new_host_id
+    await session.commit()
+
+
 async def save_state_snapshot(
     session: AsyncSession,
     room_id: uuid.UUID,

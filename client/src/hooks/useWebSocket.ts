@@ -19,6 +19,8 @@ export type WebSocketHandle = {
   /** Most recent server event (ping/echo/error/room_joined/...). */
   lastEvent: { type: string; payload: Record<string, unknown> } | null;
   send: (event: { type: string; payload: Record<string, unknown> }) => void;
+  /** Send (and remember) join_room; resent automatically after every reconnect. */
+  join: (payload: Record<string, unknown>) => void;
 };
 
 export function useWebSocket(url: string): WebSocketHandle {
@@ -34,23 +36,32 @@ export function useWebSocket(url: string): WebSocketHandle {
   const attemptRef = useRef(0);
   const retriedOnceRef = useRef(false);
   const cancelledRef = useRef(false);
+  const joinPayloadRef = useRef<Record<string, unknown> | null>(null);
 
   const connect = useCallback(() => {
     if (cancelledRef.current) {
       return;
     }
+    console.log("[WP] ws connecting:", url);
     setStatus("connecting");
     const socket = new WebSocket(url);
     socketRef.current = socket;
 
     socket.onopen = () => {
       attemptRef.current = 0;
+      console.log("[WP] ws open");
       setStatus("open");
       // Flush anything queued while connecting.
       for (const queued of queueRef.current) {
         socket.send(queued);
       }
       queueRef.current = [];
+      // Rejoin after every reconnect (10.1): the first message must be join_room.
+      const joinPayload = joinPayloadRef.current;
+      if (joinPayload) {
+        console.log("[WP] ws rejoin after (re)connect");
+        socket.send(JSON.stringify({ type: "join_room", payload: joinPayload }));
+      }
     };
 
     socket.onmessage = (event: MessageEvent<string>) => {
@@ -58,7 +69,16 @@ export function useWebSocket(url: string): WebSocketHandle {
       try {
         parsed = JSON.parse(event.data) as typeof parsed;
       } catch {
+        console.warn("[WP] ws: non-JSON message", event.data);
         return;
+      }
+      if (parsed.type && parsed.type !== "ping") {
+        console.log("[WP] ws <-", parsed.type);
+      }
+      // A joined room proves a healthy session, so the next 4007 burst gets its
+      // own retry. Not reset in onopen: that would let a failing gate loop forever.
+      if (parsed.type === "room_joined") {
+        retriedOnceRef.current = false;
       }
       setLastEvent({ type: parsed.type ?? "", payload: parsed.payload ?? {} });
       if (parsed.type === "ping") {
@@ -72,6 +92,7 @@ export function useWebSocket(url: string): WebSocketHandle {
       if (cancelledRef.current) {
         return;
       }
+      console.log("[WP] ws closed: code", event.code, "reason", event.reason || "(none)");
       setCloseInfo({ code: event.code, reason: event.reason });
       if (NO_RETRY_CLOSE_CODES.has(event.code)) {
         setStatus("closed"); // terminal: show the close code, do not retry
@@ -94,7 +115,10 @@ export function useWebSocket(url: string): WebSocketHandle {
     };
 
     // Browsers fire onerror before onclose; force the close path so policy applies.
-    socket.onerror = () => socket.close();
+    socket.onerror = () => {
+      console.warn("[WP] ws error");
+      socket.close();
+    };
   }, [url]);
 
   useEffect(() => {
@@ -119,5 +143,13 @@ export function useWebSocket(url: string): WebSocketHandle {
     }
   }, []);
 
-  return { status, closeInfo, lastEvent, send };
+  const join = useCallback(
+    (payload: Record<string, unknown>) => {
+      joinPayloadRef.current = payload;
+      send({ type: "join_room", payload });
+    },
+    [send],
+  );
+
+  return { status, closeInfo, lastEvent, send, join };
 }

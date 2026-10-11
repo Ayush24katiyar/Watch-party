@@ -1,21 +1,7 @@
 """REST integration tests: identity and rooms (architecture 8.1, 16 Phase 2)."""
 
-import pytest
-
 from tests.conftest import TEST_ORIGIN  # noqa: F401  (documents the shared origin)
-
-
-@pytest.fixture()
-def client(monkeypatch):
-    from fastapi.testclient import TestClient
-
-    from watch_party.config import get_settings
-    from watch_party.main import create_app
-
-    get_settings.cache_clear()
-    with TestClient(create_app()) as test_client:
-        yield test_client
-    get_settings.cache_clear()
+from watch_party.domain.room_code import CODE_ALPHABET
 
 
 def auth_headers(user_id: str, token: str) -> dict[str, str]:
@@ -35,7 +21,7 @@ def test_create_room_returns_code(client) -> None:
     assert response.status_code == 201
     code = response.json()["code"]
     assert len(code) == 6
-    assert set(code) <= set("ABCDEFGHJKMNPQRSTUVWXYZ23456789")
+    assert set(code) <= set(CODE_ALPHABET)
 
 
 def test_create_room_with_bad_token_is_unauthorized(client) -> None:

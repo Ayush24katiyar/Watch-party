@@ -59,6 +59,17 @@ async def update_username(
     await session.commit()
 
 
+async def update_role(
+    session: AsyncSession, room_id: uuid.UUID, user_id: uuid.UUID, role: Role
+) -> None:
+    """assign_role / transfer_host / reassignment (10.4, 8.2)."""
+    member = await get_member(session, room_id, user_id)
+    if member is None:
+        return
+    member.role = role.value
+    await session.commit()
+
+
 async def ban_member(session: AsyncSession, room_id: uuid.UUID, user_id: uuid.UUID) -> None:
     """Removed users cannot rejoin this room (D-16; remove flow lands in Phase 4)."""
     member = await get_member(session, room_id, user_id)

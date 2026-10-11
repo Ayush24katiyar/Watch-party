@@ -35,6 +35,23 @@ class Settings(BaseSettings):
     rest_rate_limit_per_minute: float = 30.0
     room_creation_rate_limit_per_minute: float = 5.0
 
+    # Empty rooms close themselves after this long with nobody online (10.5).
+    empty_room_ttl_seconds: float = 600.0
+
+    # Host disconnect grace before auto-reassignment (D-15, 10.3).
+    host_grace_seconds: float = 30.0
+
+    # Playback state snapshots are debounced to one DB write per window (D-22).
+    playback_debounce_seconds: float = 1.0
+
+    # Approval requests (Phase 6): lifetime and sweeper cadence (8.3).
+    request_ttl_seconds: float = 60.0
+    request_sweep_seconds: float = 5.0
+
+    # Per-connection rate limits for chat and reactions (S-7).
+    chat_rate_limit_per_second: float = 3.0
+    reaction_rate_limit_per_second: float = 5.0
+
     # Tests run the same engine from several event loops (sync tests via anyio.run
     # plus the TestClient portal); NullPool avoids cross-loop connection reuse.
     db_null_pool: bool = False

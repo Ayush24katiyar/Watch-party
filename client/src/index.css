@@ -396,12 +396,18 @@ p {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  flex: 1;
-  min-width: 12rem;
+  width: 100%;
+}
+
+.seek label {
+  color: var(--muted);
+  font-size: 0.8125rem;
+  white-space: nowrap;
 }
 
 .seek input[type="range"] {
   flex: 1;
+  min-width: 0;
   accent-color: var(--accent);
 }
 

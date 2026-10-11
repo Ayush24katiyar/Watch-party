@@ -95,16 +95,19 @@ export default function ControlBar({
         </span>
       </div>
 
-      <label className="seek">
-        <span className="sr-only">Seek</span>
+      <div className="seek">
+        <label htmlFor="seek-slider">Seek</label>
         <input
+          id="seek-slider"
           type="range"
           min={0}
           max={Math.max(600, Math.floor(seekValue) + 120)}
           value={Math.min(Math.floor(seekValue), 600)}
           onChange={(event) => handleSeek(Number(event.target.value))}
+          aria-valuetext={`${Math.floor(seekValue)} seconds`}
         />
-      </label>
+        <span className="time">{Math.floor(seekValue)}s</span>
+      </div>
 
       <div className="control-row">
         <label className="sr-only" htmlFor="video-url">

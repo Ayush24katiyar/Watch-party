@@ -1,0 +1,73 @@
+# Render blueprint (architecture 16, Phase 9; PRODUCTION.md section 7).
+#
+# Creates the API service and its Postgres in one deploy.
+#
+# AFTER CREATING: fix the DATABASE_URL scheme. Render injects
+# `postgresql://`, but asyncpg needs `postgresql+asyncpg://` or the app
+# crashes on boot. Edit the env var in the dashboard after the first sync.
+
+services:
+  - type: web
+    name: watch-party-api
+    runtime: python
+    # Free tier sleeps after ~15 min idle and the first request then takes
+    # ~50s. Fine for a demo, but every WebSocket drops while asleep.
+    plan: starter
+    rootDir: .
+
+    # --frozen = install exactly uv.lock, never re-resolve.
+    # --no-dev  = skip pytest/mypy/ruff; they are not needed at runtime.
+    buildCommand: uv sync --frozen --no-dev
+
+    # Runs before the new version serves traffic, so the schema is current.
+    # If your plan has no Pre-Deploy Command, move this to the end of
+    # buildCommand instead:
+    #   buildCommand: uv sync --frozen --no-dev && uv run alembic upgrade head
+    preDeployCommand: uv run alembic upgrade head
+
+    # --workers 1        rooms live in process memory (D-11); two workers give
+    #                    two users different copies of the same room.
+    # --ws-max-size 64KB transport-level cap (S-6, layer 2). The app also
+    #                    enforces it per message.
+    startCommand: >-
+      uv run uvicorn watch_party.main:app
+      --host 0.0.0.0 --port $PORT
+      --workers 1 --ws-max-size 65536
+
+    healthCheckPath: /health
+
+    envVars:
+      # .python-version already pins 3.13, but Render's own knob is explicit.
+      - key: PYTHON_VERSION
+        value: "3.13"
+
+      # ⚠ REWRITE THIS TO postgresql+asyncpg:// AFTER THE FIRST DEPLOY.
+      # Render hands out `postgresql://`; asyncpg rejects that scheme.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: watchparty-db
+          property: connectionString
+
+      # Exact client URL, scheme + host, NO trailing slash. Used for CORS and
+      # for the WebSocket Origin check. Set this to your Vercel URL.
+      - key: ALLOWED_ORIGINS
+        sync: false
+
+      # A missing Origin header is rejected before the socket is accepted (S-3).
+      # This is local-only; true in production is a cross-site WebSocket hijack.
+      - key: ALLOW_MISSING_ORIGIN
+        value: "false"
+
+      # /debug exposes live rooms, user ids and the event buffer. Local only.
+      - key: DEBUG_ENDPOINTS
+        value: "false"
+
+      # Tokens and payloads are never logged (S-2).
+      - key: LOG_LEVEL
+        value: INFO
+
+databases:
+  - name: watchparty-db
+    plan: basic-256mb
+    # Same region as the service: the internal connection is faster and free.
+    region: oregon

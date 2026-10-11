@@ -41,6 +41,7 @@ type YtPlayerInstance = {
   isMuted: () => boolean;
   mute: () => void;
   unMute: () => void;
+  setPlaybackRate: (rate: number) => void;
   destroy: () => void;
 };
 

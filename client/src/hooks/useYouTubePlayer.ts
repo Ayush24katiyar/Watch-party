@@ -22,6 +22,7 @@ type PlayerInstance = {
   seekTo: (seconds: number, allowSeekAhead: boolean) => void;
   getCurrentTime: () => number;
   getPlayerState: () => number;
+  setPlaybackRate: (rate: number) => void;
   destroy: () => void;
 };
 
@@ -135,6 +136,11 @@ export function useYouTubePlayer({
               }
               readyRef.current = true;
               setStatus("ready");
+              // Pin to 1x. YouTube restores the viewer's remembered per-video
+              // speed, which makes audio run fast and, because the drift math
+              // projects time linearly, makes drift correction fight the video.
+              // A watch party is meaningless unless everyone is at 1x.
+              playerRef.current?.setPlaybackRate(1);
               // Apply whatever state arrived while the embed was loading.
               if (lastStateRef.current) {
                 applyRemote(lastStateRef.current);

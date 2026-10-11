@@ -38,6 +38,17 @@ async function parseError(response: Response): Promise<ApiError> {
   return new ApiError(response.status, code, message);
 }
 
+/**
+ * True when the server rejected our stored credentials.
+ *
+ * Must key off the machine-readable `code`, never the message: the backend
+ * sends "Authentication failed.", and the friendlier "session expired" text is
+ * only what we render, so matching on it silently never fires.
+ */
+export function isUnauthorized(error: unknown): boolean {
+  return error instanceof ApiError && error.code === "unauthorized";
+}
+
 /** Human text for the codes the backend actually emits. */
 export function describeError(error: unknown): string {
   if (error instanceof ApiError) {

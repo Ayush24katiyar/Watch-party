@@ -171,7 +171,10 @@ export function useRoomSocket({
       }
       socketRef.current?.close();
     };
-  }, [enabled, identity, connect]);
+    // `identity` is compared by value on purpose: an equal-but-new object
+    // (loadIdentity() builds a fresh one) must not tear down a live socket and
+    // reconnect, or the server closes the first one as a duplicate (4004).
+  }, [enabled, identity?.userId, identity?.token, connect]);
 
   const send = useCallback((event: ClientEvent) => {
     const socket = socketRef.current;

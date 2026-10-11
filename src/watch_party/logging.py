@@ -52,3 +52,13 @@ def log_event(
         room_code,
         " ".join(f"{key}={value}" for key, value in safe.items()),
     )
+    # Mirror into the diagnostics buffer so /debug/events shows the same trail.
+    from watch_party.debug.recorder import record
+
+    record(
+        "message",
+        event=event_type,
+        room=(room_code or "").upper(),
+        user=user_id,
+        **safe,
+    )

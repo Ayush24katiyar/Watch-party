@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from watch_party.api.routes import router as api_router
 from watch_party.config import get_settings
 from watch_party.db.engine import SessionLocal, engine
+from watch_party.debug.routes import router as debug_router
 from watch_party.domain.room_manager import room_manager
 from watch_party.logging import configure_logging, get_logger
 from watch_party.repositories import rooms as room_repo
@@ -144,6 +145,12 @@ def create_app() -> FastAPI:
     app.include_router(ws_router)
     # Phase 2: identity and rooms over REST.
     app.include_router(api_router)
+
+    # Local diagnostics: live room state + recent events, so a browser problem
+    # can be pinned down from the terminal. Off in production.
+    if settings.debug_endpoints:
+        app.include_router(debug_router)
+        logger.info("debug endpoints enabled at /debug (disable with DEBUG_ENDPOINTS=false)")
 
     return app
 

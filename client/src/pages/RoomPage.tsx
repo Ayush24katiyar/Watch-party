@@ -3,7 +3,7 @@ import { Link, useLocation, useParams } from "react-router-dom";
 import { RefreshCw } from "lucide-react";
 import { useRoomSocket } from "../hooks/useRoomSocket";
 import { useRoomState } from "../hooks/useRoomState";
-import { clearIdentity, ensureIdentity, loadIdentity } from "../lib/identity";
+import { ensureIdentity, loadIdentity, refreshIdentity, sameIdentity } from "../lib/identity";
 import { CLOSE } from "../lib/protocol";
 import type { ClientEvent, Identity, Reaction, RequestActionKind } from "../lib/types";
 import ConfirmDialog from "../components/ConfirmDialog";
@@ -48,15 +48,20 @@ export default function RoomPage() {
   }, []);
 
   useEffect(() => {
+    // Re-reading localStorage yields a fresh object; keep the current one when
+    // the credentials are unchanged so the socket is not rebuilt.
     ensureIdentity()
-      .then(setIdentity)
+      .then((fresh) => {
+        setIdentity((current) => (sameIdentity(current, fresh) ? current : fresh));
+      })
       .catch(() => toast("Could not reach the server.", "error"));
   }, [toast]);
 
-  // A rejected token must be replaced, not retried forever.
+  // A rejected token must be replaced, not retried forever: the stored user may
+// no longer exist (wiped dev DB), so keep a fresh one ready for the next visit.
   useEffect(() => {
     if (socket.fatal?.code === CLOSE.UNAUTHORIZED || socket.fatal?.code === CLOSE.BAD_JOIN) {
-      clearIdentity();
+      refreshIdentity().catch(() => undefined);
     }
   }, [socket.fatal]);
 

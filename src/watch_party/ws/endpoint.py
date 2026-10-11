@@ -19,6 +19,7 @@ from pydantic import ValidationError
 
 from watch_party.config import Settings, get_settings
 from watch_party.db.engine import SessionLocal
+from watch_party.debug.recorder import record
 from watch_party.domain.participant import Participant
 from watch_party.domain.rate_limit import TokenBucket
 from watch_party.domain.roles import Role
@@ -197,38 +198,61 @@ class Connection:
     async def _assign_member(
         self, room: Room, payload: JoinRoomPayload, user_id: UUID
     ) -> Participant | None:
-        """Returning member or new participant, attached to this connection (10.1, D-13)."""
+        """Returning member or new participant, attached to this connection (10.1, D-13).
+
+        The lock guards in-memory state only (B-014): DB writes and the close of
+        a replaced socket happen after it is released, so a slow query cannot
+        stall every other join in the room.
+        """
+        pending_username: str | None = None
+        is_new_member = False
+        previous: Connection | None = None
+        participant: Participant | None = None
+
         async with room.lock:
             member = room.participants.get(str(user_id))
-            participant: Participant | None
             if member is not None:
-                await self._replace_placeholder_username(room, member, payload.username)
                 participant = member
+                # Returning members keep their stored name (10.3), except the
+                # creator's placeholder, replaced by the name they choose now.
+                if member.username == ROOM_CREATOR_PLACEHOLDER:
+                    member.username = unique_username(
+                        payload.username,
+                        [p.username for p in room if p.user_id != member.user_id],
+                    )
+                    pending_username = member.username
             else:
                 participant = await self._add_participant(room, payload, user_id)
                 if participant is None:
                     return None
-            await self._handle_duplicate_connection(participant)
-        return participant
+                pending_username = participant.username
+                is_new_member = True
+            previous = participant.connection
+            participant.connection = self
 
-    async def _replace_placeholder_username(
-        self, room: Room, member: Participant, username: str
-    ) -> None:
-        """Returning members keep their stored name (10.3) - except the creator's
-        placeholder, which is replaced by the name they choose at their first join."""
-        if member.username != ROOM_CREATOR_PLACEHOLDER:
-            return
-        chosen = unique_username(username, [p.username for p in room if p.user_id != member.user_id])
-        member.username = chosen
+        # Outside the lock: persistence and the 4004 close.
         async with SessionLocal() as session:
-            await self.run_db(
-                member_repo.update_username(session, room.require_db_id(), UUID(member.user_id), chosen)
-            )
+            if is_new_member:
+                await self.run_db(
+                    member_repo.add_member(
+                        session, room.require_db_id(), user_id, pending_username or ""
+                    )
+                )
+            elif pending_username is not None:
+                await self.run_db(
+                    member_repo.update_username(
+                        session, room.require_db_id(), user_id, pending_username
+                    )
+                )
+        if previous is not None and previous is not self:
+            await previous.close(4004)
+        return participant
 
     async def _add_participant(
         self, room: Room, payload: JoinRoomPayload, user_id: UUID
     ) -> Participant | None:
-        """New member: locked (4006) and full (4005) are checked before any state change."""
+        """New member, in memory only: locked (4006) and full (4005) are checked
+        before any state change. Persistence happens outside the room lock (B-014)."""
         if room.locked:
             await self.reject("room_locked", "Room is locked.")
             await self.close(4006)
@@ -240,16 +264,7 @@ class Connection:
         username = unique_username(payload.username, [p.username for p in room])
         participant = Participant(str(user_id), username, Role.PARTICIPANT, time.time())
         room.add(participant)
-        async with SessionLocal() as session:
-            await self.run_db(member_repo.add_member(session, room.require_db_id(), user_id, username))
         return participant
-
-    async def _handle_duplicate_connection(self, participant: Participant) -> None:
-        """D-14: one connection per user; the new tab replaces the old one (4004)."""
-        previous = participant.connection
-        if previous is not None and previous is not self:
-            await previous.close(4004)
-        participant.connection = self
 
     async def _resolve_room(self, code: str) -> Room | None:
         room = room_manager.get(code)
@@ -466,6 +481,13 @@ class Connection:
         payload: dict[str, Any] = {"code": code, "message": message}
         if request_id is not None:
             payload["requestId"] = request_id
+        record(
+            "reject",
+            room=self.room.code if self.room else "",
+            user=self.you.user_id if self.you else None,
+            code=code,
+            request_id=request_id,
+        )
         await self.send({"type": "error", "payload": payload})
         if code != "rate_limited":
             # S-5: 10 invalid messages in 60 s -> close 4009.
@@ -474,6 +496,12 @@ class Connection:
                 await self.close(4009)
 
     async def close(self, code: int) -> None:
+        record(
+            "close",
+            room=self.room.code if self.room else "",
+            user=self.you.user_id if self.you else None,
+            code=code,
+        )
         if self._closing:
             return
         self._closing = True
@@ -525,6 +553,7 @@ async def websocket_endpoint(websocket: WebSocket, code: str) -> None:
     settings = get_settings()
     client = f"{websocket.client.host}:{websocket.client.port}" if websocket.client else "unknown"
     logger.info("WS /ws/%s upgrade requested (client=%s)", code.upper(), client)
+    record("ws_open_attempt", room=code.upper(), client=client)
     if not _origin_allowed(websocket.headers.get("origin"), settings):
         # Reject before accept: denied upgrade (HTTP 403), no socket is opened (S-3).
         logger.warning("WS /ws/%s rejected: bad origin", code.upper())
@@ -533,7 +562,9 @@ async def websocket_endpoint(websocket: WebSocket, code: str) -> None:
 
     await websocket.accept()
     logger.info("WS /ws/%s accepted (client=%s)", code.upper(), client)
+    record("ws_accepted", room=code.upper(), client=client)
     try:
         await Connection(websocket, code, settings).run()
     finally:
         logger.info("WS /ws/%s connection closed (client=%s)", code.upper(), client)
+        record("ws_closed", room=code.upper(), client=client)

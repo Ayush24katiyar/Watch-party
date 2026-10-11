@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     # plus the TestClient portal); NullPool avoids cross-loop connection reuse.
     db_null_pool: bool = False
 
+    # Diagnostics under /debug: live room state + a recent-event buffer, so a
+    # browser problem can be pinned down from the terminal instead of guessed.
+    # Never enable in production (it exposes room codes and user ids).
+    debug_endpoints: bool = True
+    debug_event_buffer: int = 200
+
     @field_validator("allowed_origins", mode="before")
     @classmethod
     def _split_csv(cls, value: object) -> object:

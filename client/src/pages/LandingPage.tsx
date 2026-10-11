@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Clapperboard, Loader2, LogIn, Plus } from "lucide-react";
-import { createRoom, describeError, getRoomCheck } from "../lib/api";
-import { clearIdentity, ensureIdentity, loadIdentity } from "../lib/identity";
+import { createRoom, describeError, getRoomCheck, isUnauthorized } from "../lib/api";
+import { ensureIdentity, loadIdentity, refreshIdentity, sameIdentity } from "../lib/identity";
 import type { Identity } from "../lib/types";
 
 const CODE_LENGTH = 6;
@@ -21,12 +21,24 @@ export default function LandingPage() {
     if (identity) {
       return;
     }
+    // loadIdentity() returns a new object each call; keep the existing one when
+    // the values match so nothing downstream sees a changed reference.
     ensureIdentity()
-      .then(setIdentity)
+      .then((fresh) => setIdentity((current) => (sameIdentity(current, fresh) ? current : fresh)))
       .catch(() => setError(describeError(new Error("Could not reach the server."))));
   }, [identity]);
 
   const name = username.trim() || "guest";
+
+  /** A rejected identity is replaced on the spot, so the user is never stuck. */
+  const recoverFromExpired = async () => {
+    try {
+      setIdentity(await refreshIdentity());
+      setError("Your session expired, so a new one was created. Try again.");
+    } catch {
+      setError("Could not create a new session. Check your connection.");
+    }
+  };
 
   const handleCreate = async () => {
     if (!identity) {
@@ -39,11 +51,11 @@ export default function LandingPage() {
       const roomCode = await createRoom(identity);
       navigate(`/room/${roomCode}`, { state: { username: name } });
     } catch (err) {
-      // A dead token means a fresh identity on the next attempt.
-      if (err instanceof Error && err.message.toLowerCase().includes("expired")) {
-        clearIdentity();
+      if (isUnauthorized(err)) {
+        await recoverFromExpired();
+      } else {
+        setError(describeError(err));
       }
-      setError(describeError(err));
       setBusy(null);
     }
   };
@@ -74,7 +86,13 @@ export default function LandingPage() {
       window.localStorage.setItem("watch_party.username", name);
       navigate(`/room/${trimmed}`, { state: { username: name } });
     } catch (err) {
-      setError(describeError(err));
+      // GET /rooms/{code} is unauthenticated, so a 401 here means the room
+      // lookup itself failed; refresh the identity so the next attempt works.
+      if (isUnauthorized(err)) {
+        await recoverFromExpired();
+      } else {
+        setError(describeError(err));
+      }
     } finally {
       setChecking(false);
     }

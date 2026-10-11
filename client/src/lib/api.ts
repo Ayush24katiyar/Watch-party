@@ -1,12 +1,18 @@
+/**
+ * REST client (architecture 8.1). Credentials travel in headers, never URLs (D-5).
+ * The token is returned exactly once by POST /api/users (D-1).
+ */
+
 import type { Identity, RoomCheck } from "./types";
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
 
-export type HealthResponse = {
-  status: string;
-};
+export type ApiErrorCode =
+  | "unauthorized"
+  | "rate_limited"
+  | "room_limit"
+  | "not_found";
 
-/** Low-level fetch wrapper: parses the app's error shape and throws ApiError. */
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string | null;
@@ -21,38 +27,60 @@ export class ApiError extends Error {
 
 async function parseError(response: Response): Promise<ApiError> {
   let code: string | null = null;
-  let message = `request failed with ${response.status}`;
+  let message = `Request failed (${response.status}).`;
   try {
     const body = (await response.json()) as { detail?: { code?: string; message?: string } };
     code = body.detail?.code ?? null;
     message = body.detail?.message ?? message;
   } catch {
-    // keep defaults
+    // Non-JSON body; keep the generic message.
   }
   return new ApiError(response.status, code, message);
 }
 
-export async function getHealth(signal?: AbortSignal): Promise<HealthResponse> {
-  const response = await fetch(`${API_URL}/health`, { signal });
-  if (!response.ok) {
-    throw await parseError(response);
+/** Human text for the codes the backend actually emits. */
+export function describeError(error: unknown): string {
+  if (error instanceof ApiError) {
+    switch (error.code) {
+      case "unauthorized":
+        return "Your session expired. Please try again.";
+      case "rate_limited":
+        return "Too many requests - wait a moment and retry.";
+      case "room_limit":
+        return "You already have 3 live rooms. Close one first.";
+      default:
+        return error.message;
+    }
   }
-  return (await response.json()) as HealthResponse;
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return "Something went wrong.";
 }
 
-export async function createUser(): Promise<Identity> {
-  const response = await fetch(`${API_URL}/api/users`, { method: "POST" });
+/** Issue an anonymous identity. The token is shown once and stored (D-1). */
+export async function createUser(signal?: AbortSignal): Promise<Identity> {
+  const response = await fetch(`${API_URL}/api/users`, {
+    method: "POST",
+    signal,
+  });
   if (!response.ok) {
     throw await parseError(response);
   }
   return (await response.json()) as Identity;
 }
 
-export async function createRoom(identity: Identity): Promise<string> {
-  // Credentials in headers, never in the URL (D-5).
+export async function createRoom(
+  identity: Identity,
+  signal?: AbortSignal,
+): Promise<string> {
   const response = await fetch(`${API_URL}/api/rooms`, {
     method: "POST",
-    headers: { "X-User-Id": identity.userId, "X-User-Token": identity.token },
+    headers: {
+      "X-User-Id": identity.userId,
+      "X-User-Token": identity.token,
+    },
+    signal,
   });
   if (!response.ok) {
     throw await parseError(response);
@@ -61,8 +89,9 @@ export async function createRoom(identity: Identity): Promise<string> {
   return body.code;
 }
 
-export async function getRoomCheck(code: string): Promise<RoomCheck> {
-  const response = await fetch(`${API_URL}/api/rooms/${encodeURIComponent(code)}`);
+/** Pre-join check (D-3): never open a socket to a room that cannot be joined. */
+export async function getRoomCheck(code: string, signal?: AbortSignal): Promise<RoomCheck> {
+  const response = await fetch(`${API_URL}/api/rooms/${encodeURIComponent(code)}`, { signal });
   if (!response.ok) {
     throw await parseError(response);
   }

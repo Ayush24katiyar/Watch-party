@@ -6,7 +6,8 @@ the connection stays open unless the connection's abuse limits close it (S-5, 10
 """
 
 import json
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 

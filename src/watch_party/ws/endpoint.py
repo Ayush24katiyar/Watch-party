@@ -21,9 +21,9 @@ from watch_party.config import Settings, get_settings
 from watch_party.db.engine import SessionLocal
 from watch_party.domain.participant import Participant
 from watch_party.domain.rate_limit import TokenBucket
+from watch_party.domain.roles import Role
 from watch_party.domain.room import Room
 from watch_party.domain.room_manager import room_manager
-from watch_party.domain.roles import Role
 from watch_party.domain.usernames import unique_username
 from watch_party.logging import get_logger
 from watch_party.repositories import chat as chat_repo
@@ -91,7 +91,7 @@ class Connection:
             try:
                 # 10.1: a valid join_room must arrive within join_timeout_seconds.
                 await asyncio.wait_for(self._join_gate(), timeout=self._settings.join_timeout_seconds)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 await self.close(4007)
                 return
             while not self._closing:
@@ -142,33 +142,7 @@ class Connection:
 
         self.room = room
         self.you = you
-        recent_chat: list[dict[str, Any]] = []
-        if room.db_id is not None:
-            async with SessionLocal() as session:
-                recent_chat = await chat_repo.recent_messages(session, room.db_id)
-        await self.send(
-            {
-                "type": "room_joined",
-                "payload": {
-                    "you": you.snapshot(),
-                    "participants": room.participant_snapshots(),
-                    "state": room.state_snapshot(),
-                    "locked": room.locked,
-                    "pendingRequests": [
-                            {
-                                "requestId": request["requestId"],
-                                "userId": request["user_id"],
-                                "username": request["username"],
-                                "action": request["action"],
-                                "payload": request["payload"],
-                                "expiresAt": request["expiresAt"],
-                            }
-                            for request in room.pending_requests.values()
-                        ],
-                    "recentChat": recent_chat,
-                },
-            }
-        )
+        await self.send({"type": "room_joined", "payload": await self._joined_payload()})
         await room.broadcast(
             {
                 "type": "user_joined",
@@ -213,7 +187,7 @@ class Connection:
             await self.close(4001)
             return None
         async with SessionLocal() as session:
-            member_row = await self.run_db(member_repo.get_member(session, room.db_id, user_id))
+            member_row = await self.run_db(member_repo.get_member(session, room.require_db_id(), user_id))
         if member_row is not None and member_row.is_banned:
             await self.reject("forbidden", "You were removed from this room.")
             await self.close(4003)
@@ -226,6 +200,7 @@ class Connection:
         """Returning member or new participant, attached to this connection (10.1, D-13)."""
         async with room.lock:
             member = room.participants.get(str(user_id))
+            participant: Participant | None
             if member is not None:
                 await self._replace_placeholder_username(room, member, payload.username)
                 participant = member
@@ -247,7 +222,7 @@ class Connection:
         member.username = chosen
         async with SessionLocal() as session:
             await self.run_db(
-                member_repo.update_username(session, room.db_id, UUID(member.user_id), chosen)
+                member_repo.update_username(session, room.require_db_id(), UUID(member.user_id), chosen)
             )
 
     async def _add_participant(
@@ -266,7 +241,7 @@ class Connection:
         participant = Participant(str(user_id), username, Role.PARTICIPANT, time.time())
         room.add(participant)
         async with SessionLocal() as session:
-            await self.run_db(member_repo.add_member(session, room.db_id, user_id, username))
+            await self.run_db(member_repo.add_member(session, room.require_db_id(), user_id, username))
         return participant
 
     async def _handle_duplicate_connection(self, participant: Participant) -> None:
@@ -321,6 +296,37 @@ class Connection:
 
     # ---- steady state ----
 
+    async def _joined_payload(self) -> dict[str, Any]:
+        """The `room_joined` payload (8.3): full roster, playback state, history.
+
+        Pending requests are mapped to the camelCase wire shape (D-18); the
+        store keeps snake_case keys, so sending the raw dicts broke the client.
+        """
+        room, you = self.room, self.you
+        assert room is not None and you is not None  # only called after joining
+        recent_chat: list[dict[str, Any]] = []
+        if room.db_id is not None:
+            async with SessionLocal() as session:
+                recent_chat = await chat_repo.recent_messages(session, room.require_db_id())
+        return {
+            "you": you.snapshot(),
+            "participants": room.participant_snapshots(),
+            "state": room.state_snapshot(),
+            "locked": room.locked,
+            "pendingRequests": [
+                {
+                    "requestId": request["requestId"],
+                    "userId": request["user_id"],
+                    "username": request["username"],
+                    "action": request["action"],
+                    "payload": request["payload"],
+                    "expiresAt": request["expiresAt"],
+                }
+                for request in room.pending_requests.values()
+            ],
+            "recentChat": recent_chat,
+        }
+
     async def _process(self, raw: str) -> None:
         if not await self._check_limits(raw):
             return
@@ -347,8 +353,10 @@ class Connection:
     # ---- handlers (called by MessageRouter) ----
 
     async def on_join_room(self, payload: dict[str, Any], request_id: str | None) -> None:
-        # Kept for the router dispatch table; the join gate is _process_pre_join.
-        self._joined = True
+        # The join gate is _process_pre_join; this is the live connection
+        # answering a second join_room. Re-joining is not an error state, so
+        # answer with the current state instead of silently accepting (B-012).
+        await self.send({"type": "room_joined", "payload": await self._joined_payload()})
 
     async def on_pong(self, payload: dict[str, Any], request_id: str | None) -> None:
         self._last_pong = time.monotonic()
@@ -439,7 +447,7 @@ class Connection:
         if room.db_id is not None:
             try:
                 async with SessionLocal() as session:
-                    await self.run_db(room_repo.set_room_status(session, room.db_id, "closed"))
+                    await self.run_db(room_repo.set_room_status(session, room.require_db_id(), "closed"))
             except (TimeoutError, OSError):
                 pass  # DB unreachable: still forget; a later join restores from the DB row
         # 8.3: tell any remaining connections, then close.

@@ -1,7 +1,7 @@
 """SQLAlchemy models (architecture section 12).
 
-Tables: users, rooms, room_members. This module is the ONLY place that defines
-table structure; repositories are the only place that touches it.
+Tables: users, rooms, room_members, chat_messages. This module is the ONLY place
+that defines table structure; repositories are the only place that touches it.
 """
 
 import uuid

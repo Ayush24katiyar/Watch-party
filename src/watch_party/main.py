@@ -1,18 +1,25 @@
 import asyncio
 import time
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from watch_party.api.routes import router as api_router
 from watch_party.config import get_settings
-from watch_party.db.engine import engine
+from watch_party.db.engine import SessionLocal, engine
 from watch_party.domain.room_manager import room_manager
 from watch_party.logging import configure_logging, get_logger
+from watch_party.repositories import rooms as room_repo
 from watch_party.ws.endpoint import router as ws_router
 
 logger = get_logger()
+
+# Per-connection ceiling during shutdown, so a dead peer cannot hang the exit.
+CLOSE_TIMEOUT_SECONDS = 2.0
+# How often the stale-room reaper runs.
+REAP_INTERVAL_SECONDS = 60.0
 
 
 async def _request_sweeper() -> None:
@@ -33,22 +40,61 @@ async def _request_sweeper() -> None:
                 )
 
 
+async def _room_reaper() -> None:
+    """Close rooms that are live in the database but dead in memory (10.5).
+
+    The in-memory empty-room timer only runs once somebody has joined and left.
+    A room created over REST and never joined - or one whose timer was lost when
+    the process restarted - would otherwise stay 'open' forever and count
+    against the creator's live-room limit (S-9).
+    """
+    settings = get_settings()
+    while True:
+        await asyncio.sleep(REAP_INTERVAL_SECONDS)
+        cutoff = datetime.now(UTC) - timedelta(seconds=settings.empty_room_ttl_seconds)
+        try:
+            async with SessionLocal() as session:
+                stale = await room_repo.find_reapable_rooms(session, cutoff)
+                for room in stale:
+                    # Never close a room somebody is actually sitting in.
+                    live = room_manager.get(room.code)
+                    if live is not None and live.has_online_participants():
+                        continue
+                    await room_repo.set_room_status(session, room.id, "closed")
+                    logger.info("reaped stale room code=%s", room.code)
+        except (TimeoutError, OSError):
+            # DB unreachable; try again on the next tick.
+            continue
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     configure_logging()
     logger.info("watch-party starting up")
     sweeper = asyncio.create_task(_request_sweeper())
+    reaper = asyncio.create_task(_room_reaper())
     try:
         yield
     finally:
         sweeper.cancel()
+        reaper.cancel()
         try:
             await sweeper
         except asyncio.CancelledError:
             pass
+        try:
+            await reaper
+        except asyncio.CancelledError:
+            pass
         # 10.7: graceful shutdown - tell every client to reconnect (1012).
+        # Bounded: one wedged socket must not stall engine.dispose() forever.
         for connection in room_manager.all_connections():
-            await connection.close(1012)
+            try:
+                await asyncio.wait_for(connection.close(1012), timeout=CLOSE_TIMEOUT_SECONDS)
+            except TimeoutError:
+                logger.warning("shutdown: timed out closing a connection")
+            except Exception:
+                logger.warning("shutdown: error closing a connection", exc_info=True)
         await engine.dispose()
 
 

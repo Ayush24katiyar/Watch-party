@@ -1,144 +1,190 @@
+/**
+ * All server state lives here (architecture 8.3). One reducer, one shape.
+ *
+ * The switch is exhaustive: `never` in the default arm makes a new server
+ * event a compile error rather than a silent no-op.
+ */
+
 import { useEffect, useReducer } from "react";
-import type { WireEnvelope } from "../lib/types";
+import type { ChatMessage, Participant, PendingRequest, PlaybackState, ServerEvent } from "../lib/types";
+import { CHAT_MAX } from "../lib/types";
 
-/** One room member as carried by the wire (8.0/8.3). */
-export type RoomParticipant = {
-  userId: string;
-  username: string;
-  role: "host" | "moderator" | "participant";
-  online: boolean;
-};
-
-/** Server-authoritative playback state (8.0, D-7). */
-export type PlaybackState = {
-  videoId: string | null;
-  playState: "playing" | "paused";
-  currentTime: number;
-  seq: number;
-};
-
-export type PendingRequest = {
-  requestId: string;
-  userId: string;
-  username: string;
-  action: string;
-  payload: Record<string, unknown>;
-  expiresAt: number;
-};
-
-export type ChatMessage = {
-  userId: string;
-  username: string;
-  text: string;
-  createdAt: string;
-};
+const CHAT_HISTORY = 50;
 
 export type RoomState = {
-  you: RoomParticipant | null;
-  participants: RoomParticipant[];
-  state: PlaybackState;
+  you: Participant | null;
+  participants: Participant[];
+  playback: PlaybackState;
   locked: boolean;
   pendingRequests: PendingRequest[];
   chat: ChatMessage[];
+  /** Transient banner text, e.g. "neha is the new host". */
+  notice: string | null;
 };
 
-type RoomJoinedPayload = {
-  you: RoomParticipant;
-  participants: RoomParticipant[];
-  state: PlaybackState;
-  locked: boolean;
-  recentChat: ChatMessage[];
+export const EMPTY_PLAYBACK: PlaybackState = {
+  videoId: null,
+  playState: "paused",
+  currentTime: 0,
+  seq: 0,
 };
 
-type RoomAction =
-  | { type: "room_joined"; payload: RoomJoinedPayload & { pendingRequests: PendingRequest[] } }
-  | {
-      type: "user_joined" | "user_left" | "role_assigned" | "participant_removed" | "host_transferred";
-      payload: { participants: RoomParticipant[] };
-    }
-  | { type: "room_locked"; payload: { locked: boolean } }
-  | { type: "sync_state"; payload: PlaybackState }
-  | { type: "request_created"; payload: PendingRequest }
-  | {
-      type: "request_resolved";
-      payload: { requestId: string; approved: boolean; reason?: string };
-    }
-  | { type: "chat_message"; payload: ChatMessage };
-
-const initialState: RoomState = {
+const INITIAL: RoomState = {
   you: null,
   participants: [],
-  state: { videoId: null, playState: "paused", currentTime: 0, seq: 0 },
+  playback: EMPTY_PLAYBACK,
   locked: false,
   pendingRequests: [],
   chat: [],
+  notice: null,
 };
 
-/** List-changing events carry the full roster; re-derive `you` so role changes,
- * transfers and removals stay reflected (8.3). */
-function withParticipants(state: RoomState, participants: RoomParticipant[]): RoomState {
-  const you =
-    state.you === null
-      ? null
-      : (participants.find((p) => p.userId === state.you?.userId) ?? state.you);
-  return { ...state, participants, you };
+type Action =
+  | { kind: "event"; event: ServerEvent }
+  | { kind: "clear_notice" }
+  | { kind: "optimistic_request"; request: PendingRequest }
+  | { kind: "dismiss_request"; requestId: string; outcome: string };
+
+function withRoster(state: RoomState, roster: Participant[]): RoomState {
+  return { ...state, participants: roster };
 }
 
-function reducer(state: RoomState, action: RoomAction): RoomState {
-  switch (action.type) {
+function reducer(state: RoomState, action: Action): RoomState {
+  if (action.kind === "clear_notice") {
+    return state.notice === null ? state : { ...state, notice: null };
+  }
+  if (action.kind === "optimistic_request") {
+    return {
+      ...state,
+      pendingRequests: [...state.pendingRequests, action.request],
+    };
+  }
+  if (action.kind === "dismiss_request") {
+    return {
+      ...state,
+      notice: action.outcome,
+      pendingRequests: state.pendingRequests.filter(
+        (request) => request.requestId !== action.requestId,
+      ),
+    };
+  }
+
+  const event = action.event;
+  switch (event.type) {
     case "room_joined":
       return {
-        you: action.payload.you,
-        participants: action.payload.participants,
-        state: action.payload.state,
-        locked: action.payload.locked,
-        pendingRequests: action.payload.pendingRequests,
-        chat: action.payload.recentChat,
+        ...state,
+        you: event.payload.you,
+        participants: event.payload.participants,
+        playback: event.payload.state,
+        locked: event.payload.locked,
+        pendingRequests: event.payload.pendingRequests,
+        chat: event.payload.recentChat.slice(-CHAT_HISTORY),
+        notice: null,
       };
+
+    // Every presence event carries the authoritative roster; replace it whole.
     case "user_joined":
+      return withRoster(state, event.payload.participants);
     case "user_left":
+      return withRoster(state, event.payload.participants);
     case "role_assigned":
+      return withRoster(state, event.payload.participants);
+    case "host_transferred": {
+      const next = withRoster(state, event.payload.participants);
+      const promoted = next.participants.find((p) => p.userId === event.payload.newHostId);
+      // Keep the "you" row's own role fresh for the host.
+      const you = promoted && promoted.userId === state.you?.userId ? promoted : state.you;
+      return {
+        ...next,
+        you,
+        notice: promoted ? `${promoted.username} is now the host.` : state.notice,
+      };
+    }
     case "participant_removed":
-    case "host_transferred":
-      return withParticipants(state, action.payload.participants);
+      return withRoster(state, event.payload.participants);
+
     case "room_locked":
-      return { ...state, locked: action.payload.locked };
+      return { ...state, locked: event.payload.locked };
+
+    case "room_closed":
+      return { ...state, notice: "This room has closed." };
+
     case "sync_state":
-      // D-10: ignore state older than what we already have.
-      if (action.payload.seq <= state.state.seq) {
+      // D-10: ignore anything older than what we already applied.
+      if (event.payload.seq <= state.playback.seq) {
         return state;
       }
-      return { ...state, state: action.payload };
-    case "request_created":
-      // The server sends a flat PendingRequest (8.3), not a nested `request`.
+      return { ...state, playback: event.payload };
+
+    case "request_created": {
+      // The requester already added it optimistically.
+      const exists = state.pendingRequests.some(
+        (request) => request.requestId === event.payload.requestId,
+      );
+      if (exists) {
+        return state;
+      }
+      return { ...state, pendingRequests: [...state.pendingRequests, event.payload] };
+    }
+
+    case "request_resolved": {
+      const pending = state.pendingRequests.find(
+        (request) => request.requestId === event.payload.requestId,
+      );
       return {
-        ...state,
-        pendingRequests: [...state.pendingRequests, action.payload],
-      };
-    case "request_resolved":
-      return {
-        ...state,
+        ...withRoster(state, event.payload.participants),
         pendingRequests: state.pendingRequests.filter(
-          (request) => request.requestId !== action.payload.requestId,
+          (request) => request.requestId !== event.payload.requestId,
         ),
+        notice:
+          pending && pending.userId !== state.you?.userId
+            ? `${pending.username}'s request was ${event.payload.approved ? "approved" : "rejected"}.`
+            : state.notice,
       };
+    }
+
     case "chat_message":
-      return { ...state, chat: [...state.chat, action.payload].slice(-50) };
-    default:
+      return { ...state, chat: [...state.chat, event.payload].slice(-CHAT_HISTORY) };
+
+    case "reaction":
+      // Reactions are ephemeral; the player owns the floating layer.
       return state;
+
+    case "error":
+      return { ...state, notice: event.payload.message };
+
+    case "ping":
+      return state;
+
+    default: {
+      const unreachable: never = event;
+      return unreachable;
+    }
   }
 }
 
-/** Fold server events into room state; unknown event types are ignored (Phase 6+). */
-export function useRoomState(lastEvent: WireEnvelope | null): RoomState {
-  const [state, dispatch] = useReducer(reducer, initialState);
-
+export function useRoomState(lastEvent: ServerEvent | null): RoomState {
+  const [state, dispatch] = useReducer(reducer, INITIAL);
   useEffect(() => {
-    if (lastEvent === null) {
-      return;
+    if (lastEvent) {
+      dispatch({ kind: "event", event: lastEvent });
     }
-    dispatch(lastEvent as unknown as RoomAction);
   }, [lastEvent]);
-
   return state;
 }
+
+/** Imperative helpers for optimistic UI; kept beside the reducer. */
+export function roomActions(dispatch: React.Dispatch<Action>) {
+  return {
+    clearNotice: () => dispatch({ kind: "clear_notice" }),
+    optimisticRequest: (request: PendingRequest) =>
+      dispatch({ kind: "optimistic_request", request }),
+    dismissRequest: (requestId: string, outcome: string) =>
+      dispatch({ kind: "dismiss_request", requestId, outcome }),
+  };
+}
+
+export type RoomActions = ReturnType<typeof roomActions>;
+
+export { CHAT_MAX };

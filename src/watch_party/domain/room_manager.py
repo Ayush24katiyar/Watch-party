@@ -12,8 +12,8 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from watch_party.domain.participant import Participant
-from watch_party.domain.room import Room
 from watch_party.domain.roles import Role
+from watch_party.domain.room import Room
 
 if TYPE_CHECKING:
     from watch_party.ws.endpoint import Connection
@@ -26,7 +26,7 @@ class RoomManager:
     def __init__(self) -> None:
         self._rooms: dict[str, Room] = {}
         self._restore_locks: dict[str, asyncio.Lock] = {}
-        self._connections: set["Connection"] = set()
+        self._connections: set[Connection] = set()
         self._cleanup_tasks: dict[str, asyncio.Task[None]] = {}
         self._host_grace_tasks: dict[str, asyncio.Task[None]] = {}
         self._snapshot_tasks: dict[str, asyncio.Task[None]] = {}

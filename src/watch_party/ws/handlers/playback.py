@@ -27,16 +27,25 @@ async def _apply(connection: "Connection", transition, request_id: str | None) -
 
 async def handle_play(connection: "Connection", payload: dict[str, Any], request_id: str | None) -> None:
     room = connection.room
+    if room is None:
+        await connection.reject("not_found", "Not in a room.")
+        return
     await _apply(connection, lambda: room.apply_play(payload.get("time")), request_id)
 
 
 async def handle_pause(connection: "Connection", payload: dict[str, Any], request_id: str | None) -> None:
     room = connection.room
+    if room is None:
+        await connection.reject("not_found", "Not in a room.")
+        return
     await _apply(connection, lambda: room.apply_pause(payload.get("time")), request_id)
 
 
 async def handle_seek(connection: "Connection", payload: dict[str, Any], request_id: str | None) -> None:
     room = connection.room
+    if room is None:
+        await connection.reject("not_found", "Not in a room.")
+        return
     await _apply(connection, lambda: room.apply_seek(payload["time"]), request_id)
 
 
@@ -44,4 +53,7 @@ async def handle_change_video(
     connection: "Connection", payload: dict[str, Any], request_id: str | None
 ) -> None:
     room = connection.room
+    if room is None:
+        await connection.reject("not_found", "Not in a room.")
+        return
     await _apply(connection, lambda: room.apply_change_video(payload["videoId"]), request_id)

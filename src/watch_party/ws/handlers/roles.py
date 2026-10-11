@@ -56,7 +56,7 @@ async def handle_assign_role(
         target.role = Role(new_role_name)
         async with SessionLocal() as session:
             await connection.run_db(
-                member_repo.update_role(session, room.db_id, UUID(target_id), Role(new_role_name))
+                member_repo.update_role(session, room.require_db_id(), UUID(target_id), Role(new_role_name))
             )
 
     await room.broadcast(
@@ -98,7 +98,7 @@ async def handle_remove_participant(
             return
         # Removed users are banned from the room (D-16).
         async with SessionLocal() as session:
-            await connection.run_db(member_repo.ban_member(session, room.db_id, UUID(target_id)))
+            await connection.run_db(member_repo.ban_member(session, room.require_db_id(), UUID(target_id)))
         removed_connection = target.connection
         target.connection = None
         room.remove(target_id)
@@ -155,12 +155,12 @@ async def handle_transfer_host(
         room.host_user_id = target.user_id
         you.role = Role.MODERATOR
         async with SessionLocal() as session:
-            await connection.run_db(room_repo.set_room_host(session, room.db_id, UUID(target.user_id)))
+            await connection.run_db(room_repo.set_room_host(session, room.require_db_id(), UUID(target.user_id)))
             await connection.run_db(
-                member_repo.update_role(session, room.db_id, UUID(target.user_id), Role.HOST)
+                member_repo.update_role(session, room.require_db_id(), UUID(target.user_id), Role.HOST)
             )
             await connection.run_db(
-                member_repo.update_role(session, room.db_id, UUID(you.user_id), Role.MODERATOR)
+                member_repo.update_role(session, room.require_db_id(), UUID(you.user_id), Role.MODERATOR)
             )
         participants_snapshot = room.participant_snapshots()
 
@@ -203,7 +203,7 @@ async def handle_lock_room(
         async with SessionLocal() as session:
             await connection.run_db(
                 room_repo.set_room_status(
-                    session, room.db_id, "locked" if locked else "open"
+                    session, room.require_db_id(), "locked" if locked else "open"
                 )
             )
 
@@ -239,16 +239,16 @@ async def reassign_host(connection: "Connection") -> None:
             current_host.role = Role.MODERATOR
         async with SessionLocal() as session:
             await connection.run_db(
-                room_repo.set_room_host(session, room.db_id, UUID(new_host.user_id))
+                room_repo.set_room_host(session, room.require_db_id(), UUID(new_host.user_id))
             )
             if current_host is not None:
                 await connection.run_db(
                     member_repo.update_role(
-                        session, room.db_id, UUID(current_host.user_id), Role.MODERATOR
+                        session, room.require_db_id(), UUID(current_host.user_id), Role.MODERATOR
                     )
                 )
             await connection.run_db(
-                member_repo.update_role(session, room.db_id, UUID(new_host.user_id), Role.HOST)
+                member_repo.update_role(session, room.require_db_id(), UUID(new_host.user_id), Role.HOST)
             )
         participants_snapshot = room.participant_snapshots()
         events = [

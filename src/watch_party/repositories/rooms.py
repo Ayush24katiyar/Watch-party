@@ -1,6 +1,7 @@
 """Room repository: creation, lookup, membership counts (architecture 8.1, 12)."""
 
 import uuid
+from datetime import datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -74,6 +75,21 @@ async def count_live_rooms_for_user(session: AsyncSession, user_id: uuid.UUID) -
         .where(Room.host_user_id == user_id, Room.status.in_(_LIVE_STATUSES))
     )
     return int(result.scalar_one())
+
+
+async def find_reapable_rooms(session: AsyncSession, cutoff: datetime) -> list[Room]:
+    """Rooms still marked live but untouched since `cutoff`.
+
+    A room is only ever closed by the in-memory empty-room timer, which runs
+    when somebody leaves. A room created over REST is not entered into the room
+    manager until someone joins, so if it is never joined that timer never runs
+    and the room stays 'open' forever, counting against the per-user live-room
+    limit (S-9). A process restart drops any pending timer the same way.
+    """
+    result = await session.execute(
+        select(Room).where(Room.status.in_(_LIVE_STATUSES), Room.updated_at < cutoff)
+    )
+    return list(result.scalars().all())
 
 
 async def set_room_status(session: AsyncSession, room_id: uuid.UUID, status: str) -> None:

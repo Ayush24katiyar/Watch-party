@@ -1,7 +1,7 @@
 """Username uniqueness (R-3): per room, case-insensitive, "Akshay" -> "Akshay#2"."""
 
 import re
-from typing import Iterable
+from collections.abc import Iterable
 
 # Strip control characters (S-10); React escaping handles XSS on the client.
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")

@@ -1,210 +1,200 @@
-import { useEffect, useRef } from "react";
-import { loadYouTubeApi } from "../lib/youtube";
-import type { PlaybackState } from "./useRoomState";
-import type { PlaybackAction } from "./types";
-
-export type { PlaybackAction } from "./types";
-
-type YtPlayer = NonNullable<Window["YT"]>["Player"] extends new (
-  ...args: never[]
-) => infer P
-  ? P
-  : never;
-
-const SYNC_TOLERANCE_SECONDS = 1.5;
-// Drift correction is deliberately more forgiving: a real desync is seconds
-// (buffer stall, background tab), not the sub-second jitter of normal playback.
-const DRIFT_TOLERANCE_SECONDS = 2.5;
-const ECHO_GUARD_MS = 500;
-const DRIFT_CHECK_MS = 2_000;
-// If the embed is still not ready after this, warn (D-8: black/blocked player).
-const PLAYER_READY_TIMEOUT_MS = 15_000;
-
 /**
- * YouTube IFrame wrapper (architecture 11, D-8).
+ * YouTube IFrame sync (architecture 11, D-7..D-9, D-21).
  *
- * The IFrame API takes a plain <div> (it creates the <iframe> itself), so the
- * hook owns a container div and rebuilds the embed whenever the video changes
- * (fresh embed per video, D-8). Remote state is applied through a ready-queue
- * and the echo guard (`isApplyingRemote`); a 2 s drift check keeps buffering and
- * background tabs in line (D-21); `ended` is treated as paused at the end.
+ * The server is the source of truth. `sync_state` carries a seq; older ones
+ * are ignored. `currentTime` is a snapshot taken when the event was sent, so
+ * the drift check projects it forward by elapsed wall time - comparing against
+ * the raw snapshot makes the player rewind every tick.
  */
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { ClientEvent, PlaybackState } from "../lib/types";
+import { loadYouTubeApi } from "../lib/youtube";
+
+const SYNC_TOLERANCE = 1.5; // seconds of real drift before we seek (spec: ~1s)
+const DRIFT_TOLERANCE = 2.5; // looser: jitter is not drift
+const DRIFT_CHECK_MS = 2_000;
+const READY_TIMEOUT_MS = 15_000;
+
+type PlayerInstance = {
+  playVideo: () => void;
+  pauseVideo: () => void;
+  seekTo: (seconds: number, allowSeekAhead: boolean) => void;
+  getCurrentTime: () => number;
+  getPlayerState: () => number;
+  destroy: () => void;
+};
+
+export type PlayerStatus = "idle" | "loading" | "ready" | "error";
+
 export function useYouTubePlayer({
   videoId,
   state,
-  onAction,
+  send,
+  isController,
 }: {
   videoId: string | null;
   state: PlaybackState;
-  onAction: (action: PlaybackAction) => void;
+  send: (event: ClientEvent) => void;
+  isController: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const playerRef = useRef<YtPlayer | null>(null);
+  const playerRef = useRef<PlayerInstance | null>(null);
   const readyRef = useRef(false);
-  const applyingRemoteRef = useRef(false);
+  const mountedVideoRef = useRef<string | null>(null);
   const lastStateRef = useRef<PlaybackState | null>(null);
-  const latestVideoIdRef = useRef<string | null>(null);
-  const onActionRef = useRef(onAction);
-  const readyTimerRef = useRef<number | null>(null);
-  /** Wall-clock ms when the current remote state was applied (drift projection). */
   const appliedAtRef = useRef(0);
+  // Suppress our own player events from becoming new commands (echo guard).
+  const applyingRemoteRef = useRef(false);
+  const sendRef = useRef(send);
+  const isControllerRef = useRef(isController);
+  sendRef.current = send;
+  isControllerRef.current = isController;
 
-  useEffect(() => {
-    onActionRef.current = onAction;
-  }, [onAction]);
+  const [status, setStatus] = useState<PlayerStatus>("idle");
 
-  function createPlayer(id?: string) {
-    if (!containerRef.current || !window.YT?.Player) {
-      console.warn("[WP] yt: cannot create player (api or container missing)");
-      return;
-    }
-    // Fresh embed per video: clear the container first (D-8).
-    containerRef.current.innerHTML = "";
-    const mount = document.createElement("div");
-    containerRef.current.appendChild(mount);
-    console.log("[WP] yt player created:", id || "(no video yet)");
-    playerRef.current = new window.YT.Player(mount, {
-      videoId: id,
-      playerVars: { controls: 0, disablekb: 1, rel: 0, modestbranding: 1 },
-      events: {
-        onReady: () => {
-          readyRef.current = true;
-          if (readyTimerRef.current !== null) {
-            window.clearTimeout(readyTimerRef.current);
-            readyTimerRef.current = null;
-          }
-          console.log("[WP] yt player ready");
-          // Player-ready queue (11): apply the latest queued state.
-          const queued = lastStateRef.current;
-          if (queued) {
-            applyRemote(queued);
-          }
-        },
-        onStateChange: (event: { data: number }) => {
-          const YT = window.YT;
-          if (event.data === YT?.PlayerState.ENDED) {
-            console.log("[WP] yt player ended -> pausing at end");
-            playerRef.current?.pauseVideo();
-          }
-          // Echo guard (D-9): the player's own event after applying remote state.
-          if (applyingRemoteRef.current) {
-            applyingRemoteRef.current = false;
-          }
-        },
-      },
-    });
-    latestVideoIdRef.current = id ?? null;
-    // "Player does not respond" watchdog.
-    if (readyTimerRef.current !== null) {
-      window.clearTimeout(readyTimerRef.current);
-    }
-    readyTimerRef.current = window.setTimeout(() => {
-      if (!readyRef.current) {
-        console.warn(
-          "[WP] yt player not responding after",
-          PLAYER_READY_TIMEOUT_MS / 1000,
-          "s - check the link, network, or YouTube embedding restrictions",
-        );
-      }
-    }, PLAYER_READY_TIMEOUT_MS);
-  }
-
-  function destroyPlayer() {
-    try {
-      playerRef.current?.destroy();
-      console.log("[WP] yt player destroyed");
-    } catch {
-      // already gone
-    }
-    playerRef.current = null;
-    readyRef.current = false;
-    latestVideoIdRef.current = null;
-    if (containerRef.current) {
-      containerRef.current.innerHTML = "";
-    }
-  }
-
-  function applyRemote(next: PlaybackState) {
-    const player = playerRef.current;
+  const applyRemote = useCallback((next: PlaybackState) => {
     lastStateRef.current = next;
+    const player = playerRef.current;
     if (!readyRef.current || !player) {
       return;
     }
-    // Anchor the projection clock so the drift check knows where "now" starts.
     appliedAtRef.current = Date.now();
     applyingRemoteRef.current = true;
     const current = player.getCurrentTime();
-    if (Math.abs(current - next.currentTime) > SYNC_TOLERANCE_SECONDS) {
-      console.log("[WP] applyRemote: seek", current.toFixed(1), "->", next.currentTime.toFixed(1));
+    if (Math.abs(current - next.currentTime) > SYNC_TOLERANCE) {
       player.seekTo(next.currentTime, true);
     }
-    // Skip play/pause when the player is already in that state: calling
-    // playVideo() on a playing embed restarts the stream (the "refresh" bug).
-    const playerState = player.getPlayerState();
-    const isPlaying = playerState === window.YT?.PlayerState?.PLAYING;
-    const isPaused = playerState === window.YT?.PlayerState?.PAUSED;
-    console.log("[WP] applyRemote:", next.playState, "at", next.currentTime.toFixed(1), "seq", next.seq);
+    const state = player.getPlayerState();
+    const isPlaying = state === window.YT?.PlayerState?.PLAYING;
+    const isPaused = state === window.YT?.PlayerState?.PAUSED;
+    // Only act when the embed is not already there, or it restarts the stream.
     if (next.playState === "playing" && !isPlaying) {
       player.playVideo();
     } else if (next.playState === "paused" && !isPaused) {
       player.pauseVideo();
     }
-    // The player event clears the flag; this is the fallback (D-9).
     window.setTimeout(() => {
       applyingRemoteRef.current = false;
-    }, ECHO_GUARD_MS);
-  }
+    }, 500);
+  }, []);
 
-  // Video change: (re)build the embed once the API is ready (D-8).
-  //
-  // There is deliberately no "empty" player: YT.Player with no videoId throws
-  // "Invalid video id", which left the container holding a broken embed.
+  // Build a fresh embed when the video changes (D-8). No player without a video:
+  // YT.Player with no videoId throws and leaves a broken frame.
   useEffect(() => {
-    if (videoId === latestVideoIdRef.current) {
+    if (videoId === mountedVideoRef.current) {
       return;
     }
-    console.log("[WP] yt: video changed ->", videoId ?? "(none)");
     let cancelled = false;
+
+    const destroy = () => {
+      try {
+        playerRef.current?.destroy();
+      } catch {
+        // Already gone.
+      }
+      playerRef.current = null;
+      readyRef.current = false;
+      mountedVideoRef.current = null;
+      if (containerRef.current) {
+        containerRef.current.innerHTML = "";
+      }
+    };
+
     if (!videoId) {
-      destroyPlayer();
-      latestVideoIdRef.current = null;
+      destroy();
+      setStatus("idle");
       return () => {
         cancelled = true;
       };
     }
-    loadYouTubeApi().then(() => {
-      if (cancelled) {
-        return;
-      }
-      destroyPlayer();
-      createPlayer(videoId);
-    });
+
+    setStatus("loading");
+    loadYouTubeApi()
+      .then(() => {
+        if (cancelled || !containerRef.current) {
+          return;
+        }
+        destroy();
+        const mount = document.createElement("div");
+        containerRef.current.appendChild(mount);
+
+        playerRef.current = new window.YT!.Player(mount, {
+          videoId,
+          playerVars: {
+            controls: 0,
+            disablekb: 1,
+            rel: 0,
+            modestbranding: 1,
+            playsinline: 1,
+          },
+          events: {
+            onReady: () => {
+              if (cancelled) {
+                return;
+              }
+              readyRef.current = true;
+              setStatus("ready");
+              // Apply whatever state arrived while the embed was loading.
+              if (lastStateRef.current) {
+                applyRemote(lastStateRef.current);
+              }
+            },
+            onStateChange: (change: { data: number }) => {
+              if (applyingRemoteRef.current) {
+                applyingRemoteRef.current = false;
+                return;
+              }
+              if (!isControllerRef.current) {
+                return;
+              }
+              const data = change.data;
+              if (data === window.YT?.PlayerState?.ENDED) {
+                sendRef.current({ type: "pause", payload: { time: 0 } });
+                return;
+              }
+              if (data === window.YT?.PlayerState?.PAUSED) {
+                sendRef.current({ type: "pause", payload: { time: playerRef.current?.getCurrentTime() } });
+              } else if (data === window.YT?.PlayerState?.PLAYING) {
+                sendRef.current({ type: "play", payload: { time: playerRef.current?.getCurrentTime() } });
+              }
+            },
+          },
+        });
+        mountedVideoRef.current = videoId;
+
+        window.setTimeout(() => {
+          if (!readyRef.current && mountedVideoRef.current === videoId) {
+            setStatus("error");
+          }
+        }, READY_TIMEOUT_MS);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setStatus("error");
+        }
+      });
+
     return () => {
       cancelled = true;
     };
-  }, [videoId]);
+  }, [videoId, applyRemote]);
 
-  // Apply incoming server state (seq-guarded by the reducer, D-10).
+  // Apply server state (already seq-filtered by the reducer).
   useEffect(() => {
     if (lastStateRef.current === state) {
       return;
     }
-    if (state.videoId && state.videoId !== latestVideoIdRef.current) {
-      // The video effect rebuilds the embed for the new video. Record the state
-      // anyway, so onReady applies THIS state and not the previous video's (B-024).
+    if (state.videoId && state.videoId !== mountedVideoRef.current) {
+      // The embed is still building for the new video; record the state so the
+      // new player's onReady applies it instead of the old video's state.
       lastStateRef.current = state;
       return;
     }
     applyRemote(state);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state]);
+  }, [state, applyRemote]);
 
-  // Drift check (D-21): every 2 s, correct buffering / background-tab drift.
-  //
-  // The server's currentTime is a snapshot taken when the event was sent, so it
-  // must be projected forward by the elapsed wall time while playing. Comparing
-  // against the raw snapshot made the player seek back to the same position on
-  // every tick - the visible "play keeps refreshing" loop.
+  // Drift correction (D-21), skipping buffering and projections.
   useEffect(() => {
     const timer = window.setInterval(() => {
       const player = playerRef.current;
@@ -212,17 +202,13 @@ export function useYouTubePlayer({
       if (!readyRef.current || !player || last?.playState !== "playing") {
         return;
       }
-      // Never correct while the embed is buffering; it is not drifting, just stalled.
       if (player.getPlayerState() === window.YT?.PlayerState?.BUFFERING) {
         return;
       }
-      const elapsed = (Date.now() - appliedAtRef.current) / 1000;
-      const expected = last.currentTime + elapsed;
+      const expected = last.currentTime + (Date.now() - appliedAtRef.current) / 1000;
       const actual = player.getCurrentTime();
-      if (Math.abs(actual - expected) > DRIFT_TOLERANCE_SECONDS) {
-        console.log("[WP] drift correction: seek", actual.toFixed(1), "->", expected.toFixed(1));
+      if (Math.abs(actual - expected) > DRIFT_TOLERANCE) {
         player.seekTo(expected, true);
-        // Re-anchor so the next tick measures from the corrected position.
         appliedAtRef.current = Date.now();
         lastStateRef.current = { ...last, currentTime: expected };
       }
@@ -230,5 +216,5 @@ export function useYouTubePlayer({
     return () => window.clearInterval(timer);
   }, []);
 
-  return { containerRef };
+  return { containerRef, status };
 }

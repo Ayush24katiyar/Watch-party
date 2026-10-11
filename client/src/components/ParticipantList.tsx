@@ -1,9 +1,11 @@
-import { useEffect, useState } from "react";
-import type { RoomParticipant } from "../hooks/useRoomState";
+import { Crown, MoreHorizontal, Shield, ShieldOff, Trash2, UserMinus } from "lucide-react";
+import { useState } from "react";
+import RoleBadge from "./RoleBadge";
+import type { Participant, Role } from "../lib/types";
 
 export type HostAction = "promote" | "demote" | "remove" | "transfer";
 
-/** Participant list with role badges, online dots, and host-only actions (Phase 4). */
+/** Roster with presence, role badges, and host-only tools (section 9). */
 export default function ParticipantList({
   participants,
   youId,
@@ -12,107 +14,122 @@ export default function ParticipantList({
   onHostAction,
   onLockChange,
 }: {
-  participants: RoomParticipant[];
+  participants: Participant[];
   youId: string | null;
-  youRole: string | null;
+  youRole: Role | null;
   locked: boolean;
   onHostAction: (userId: string, action: HostAction) => void;
   onLockChange: (locked: boolean) => void;
 }) {
   const isHost = youRole === "host";
-  // One host action at a time: the server answers with a fresh participant
-  // snapshot, and re-clicking in the meantime used to spam the room.
-  const [busyUserId, setBusyUserId] = useState<string | null>(null);
+  // One host action at a time; the server answers with a fresh roster.
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [menuFor, setMenuFor] = useState<string | null>(null);
 
   const run = (userId: string, action: HostAction) => {
-    setBusyUserId(userId);
+    setBusyId(userId);
+    setMenuFor(null);
     onHostAction(userId, action);
   };
 
-  // The server answers every host action with a fresh snapshot, so release the
-  // button as soon as it comes back.
-  useEffect(() => {
-    setBusyUserId(null);
-  }, [participants]);
-
   return (
-    <section className="participants" data-testid="participant-list">
-      <div className="participants-header">
-        <h2>Participants ({participants.length})</h2>
+    <div>
+      <div className="control-row" style={{ justifyContent: "space-between", marginBottom: "var(--sp-2)" }}>
+        <h2>
+          Participants <span className="tab-count">({participants.length})</span>
+        </h2>
         {isHost && (
-          <button type="button" onClick={() => onLockChange(!locked)} data-testid="lock-toggle">
-            {locked ? "Unlock room" : "Lock room"}
+          <button
+            type="button"
+            className="btn btn-sm"
+            aria-pressed={locked}
+            onClick={() => onLockChange(!locked)}
+          >
+            {locked ? "Unlock" : "Lock"}
           </button>
         )}
       </div>
-      {locked && !isHost && <p className="notice">Room is locked to new members.</p>}
-      {participants.length === 0 ? (
-        <p>Nobody here yet.</p>
-      ) : (
-        <ul>
-          {participants.map((participant) => {
-            const isYou = participant.userId === youId;
-            const canManage = isHost && !isYou;
-            const busy = busyUserId === participant.userId;
-            return (
-              <li key={participant.userId} data-testid="participant-row">
-                <span className={participant.online ? "dot online" : "dot offline"} aria-hidden />
-                <span className="name">
-                  {participant.username}
-                  {isYou ? " (you)" : ""}
+
+      <ul className="roster" data-testid="participant-list">
+        {participants.map((participant) => {
+          const isYou = participant.userId === youId;
+          const busy = busyId === participant.userId;
+          const menuOpen = menuFor === participant.userId;
+          return (
+            <li key={participant.userId} data-testid="participant-row">
+              <span
+                className={participant.online ? "dot dot-online" : "dot"}
+                aria-label={participant.online ? "online" : "offline"}
+              />
+              <span className="name">
+                {participant.username}
+                {isYou && <span className="you"> (you)</span>}
+              </span>
+              <RoleBadge role={participant.role} />
+
+              {isHost && !isYou && (
+                <span className="row-actions">
+                  <button
+                    type="button"
+                    className="btn btn-icon"
+                    aria-label={`Actions for ${participant.username}`}
+                    aria-expanded={menuOpen}
+                    disabled={busy}
+                    onClick={() => setMenuFor(menuOpen ? null : participant.userId)}
+                  >
+                    <MoreHorizontal size={16} aria-hidden />
+                  </button>
                 </span>
-                <span className={`role role-${participant.role}`}>
-                  {participant.role === "host"
-                    ? "Host"
-                    : participant.role === "moderator"
-                      ? "Moderator"
-                      : "Participant"}
-                </span>
-                {canManage && (
-                  <span className="host-actions">
-                    {participant.role !== "moderator" && (
-                      <button
-                        type="button"
-                        disabled={busy}
-                        onClick={() => run(participant.userId, "promote")}
-                      >
-                        Promote
-                      </button>
-                    )}
-                    {participant.role !== "participant" && (
-                      <button
-                        type="button"
-                        disabled={busy}
-                        onClick={() => run(participant.userId, "demote")}
-                      >
-                        Demote
-                      </button>
-                    )}
-                    {participant.role !== "host" && (
-                      <button
-                        type="button"
-                        disabled={busy}
-                        onClick={() => run(participant.userId, "transfer")}
-                        data-testid={`transfer-${participant.username}`}
-                      >
-                        Make host
-                      </button>
-                    )}
+              )}
+
+              {isHost && !isYou && menuOpen && (
+                <span className="row-actions" data-testid={`actions-${participant.username}`}>
+                  {participant.role === "participant" && (
                     <button
                       type="button"
-                      disabled={busy}
-                      onClick={() => run(participant.userId, "remove")}
-                      data-testid={`remove-${participant.username}`}
+                      className="btn btn-sm"
+                      onClick={() => run(participant.userId, "promote")}
                     >
-                      Remove
+                      <Shield size={14} aria-hidden /> Mod
                     </button>
-                  </span>
-                )}
-              </li>
-            );
-          })}
-        </ul>
+                  )}
+                  {participant.role === "moderator" && (
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() => run(participant.userId, "demote")}
+                    >
+                      <ShieldOff size={14} aria-hidden /> Demote
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    onClick={() => run(participant.userId, "transfer")}
+                  >
+                    <Crown size={14} aria-hidden /> Host
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-danger"
+                    data-testid={`remove-${participant.username}`}
+                    onClick={() => run(participant.userId, "remove")}
+                  >
+                    <Trash2 size={14} aria-hidden />
+                    <span className="sr-only">Remove {participant.username}</span>
+                  </button>
+                </span>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+
+      {participants.length === 0 && (
+        <p className="empty-state">
+          <UserMinus size={20} aria-hidden /> Nobody here yet.
+        </p>
       )}
-    </section>
+    </div>
   );
 }

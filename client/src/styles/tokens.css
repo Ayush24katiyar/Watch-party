@@ -1,0 +1,68 @@
+/**
+ * Velvet theater - the single source of truth for the palette.
+ * Change a value here and it changes everywhere. Components use only tokens.
+ *
+ * Contrast ratios are measured (WCAG) against the stated background:
+ *   --text        16.7:1 on --bg
+ *   --muted        7.5:1 on --surface
+ *   --accent      10.6:1 on --bg
+ *   --on-accent   10.3:1 on --accent
+ *   --danger       6.5:1 on --surface
+ *   --success      9.7:1 on --surface
+ */
+
+:root {
+  /* ---- surfaces ---- */
+  --bg: #140e1a;
+  --surface: #1d1526;
+  --elevated: #281d34;
+  --border: #3d2f4d;
+  --border-strong: #80709a;
+
+  /* ---- ink ---- */
+  --text: #f5eef8;
+  --muted: #b3a3c2;
+
+  /* ---- accents ---- */
+  --accent: #f2b84b;
+  --on-accent: #1c1204;
+  --danger: #ff6b81;
+  --success: #6fd3a4;
+
+  /* ---- type: Inter, three sizes ---- */
+  --font-body: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --fs-body: 0.875rem; /* 14 */
+  --fs-emphasis: 1rem; /* 16 */
+  --fs-heading: 1.5rem; /* 24 */
+
+  /* ---- 8px spacing scale ---- */
+  --sp-1: 0.25rem;
+  --sp-2: 0.5rem;
+  --sp-3: 0.75rem;
+  --sp-4: 1rem;
+  --sp-5: 1.5rem;
+  --sp-6: 2rem;
+  --sp-7: 3rem;
+
+  /* ---- shape ---- */
+  --radius: 12px;
+  --radius-sm: 8px;
+  --border-width: 1px;
+
+  /* ---- motion ---- */
+  --ease: cubic-bezier(0.2, 0, 0.2, 1);
+  --dur-fast: 120ms;
+  --dur: 200ms;
+
+  /* ---- layout ---- */
+  --sidebar-w: 20rem;
+  --page-max: 82rem;
+}
+
+/* Respect the OS setting: kill transitions and the floating-reaction drift. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 0ms;
+    --dur: 0ms;
+  }
+}

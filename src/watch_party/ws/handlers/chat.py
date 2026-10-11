@@ -32,6 +32,10 @@ async def handle_chat(
     if room is None or you is None:
         await connection.reject("not_found", "Not in a room.")
         return
+    if room.db_id is None:
+        # Memory-only room with no DB row: chat has nowhere to persist.
+        await connection.reject("not_found", "Not in a room.")
+        return
     text = sanitize_chat_text(payload.get("text", ""))
     if not text:
         await connection.reject("invalid_message", "Chat text must not be empty.")

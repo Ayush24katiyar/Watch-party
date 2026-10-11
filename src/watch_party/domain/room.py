@@ -5,10 +5,11 @@ the last playback snapshot. No FastAPI, no database imports (doc rule 4).
 """
 
 import asyncio
+import secrets
 import time
 import uuid
-import secrets
-from typing import Any, Iterator
+from collections.abc import Iterator
+from typing import Any
 
 from watch_party.domain.participant import Participant
 
@@ -74,7 +75,8 @@ class Room:
             "payload": payload,
             "expiresAt": time.time() + ttl_seconds,
         }
-        self.pending_requests[request["requestId"]] = request
+        request_id = str(request["requestId"])
+        self.pending_requests[request_id] = request
         return request
 
     def get_request(self, request_id: str) -> dict[str, Any] | None:
@@ -92,6 +94,17 @@ class Room:
         return expired
 
     # ---- playback (Phase 5, section 11) ----
+
+    def require_db_id(self) -> uuid.UUID:
+        """The persisted id, for paths that must hit the database.
+
+        Every room reachable from a join path is DB-backed; a None here means a
+        memory-only room and a bug, so fail loudly instead of writing to a
+        nullable column and silently no-op'ing (B-017).
+        """
+        if self.db_id is None:
+            raise RuntimeError(f"room {self.code} has no database id")
+        return self.db_id
 
     def effective_position(self) -> float:
         """D-7: position + elapsed time while playing."""

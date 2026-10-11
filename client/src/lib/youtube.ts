@@ -1,6 +1,10 @@
-/** YouTube URL parsing (architecture 11) and IFrame API loader. */
+/** YouTube URL parsing and the IFrame API loader (architecture 11, D-8). */
 
-/** Extract a video ID from watch URLs, share URLs, shorts, embeds, or a bare ID. */
+/**
+ * Extract an 11-char video ID from a watch, share, shorts or embed URL, or
+ * from a bare ID. Returns null for anything else so callers can show an
+ * inline error rather than sending a value the server will reject.
+ */
 export function parseVideoId(input: string): string | null {
   const trimmed = input.trim();
   if (/^[A-Za-z0-9_-]{11}$/.test(trimmed)) {
@@ -8,16 +12,17 @@ export function parseVideoId(input: string): string | null {
   }
   try {
     const url = new URL(trimmed);
-    if (url.hostname.includes("youtu.be")) {
+    const host = url.hostname.replace(/^www\./, "");
+    if (host === "youtu.be") {
       const id = url.pathname.slice(1).split("/")[0];
       return /^[A-Za-z0-9_-]{11}$/.test(id) ? id : null;
     }
-    if (url.hostname.includes("youtube.com")) {
+    if (host.endsWith("youtube.com")) {
       if (url.pathname === "/watch") {
         const id = url.searchParams.get("v");
         return id && /^[A-Za-z0-9_-]{11}$/.test(id) ? id : null;
       }
-      const match = url.pathname.match(/^\/(embed|shorts)\/([A-Za-z0-9_-]{11})/);
+      const match = url.pathname.match(/^\/(embed|shorts|live)\/([A-Za-z0-9_-]{11})/);
       return match ? match[2] : null;
     }
     return null;
@@ -26,20 +31,23 @@ export function parseVideoId(input: string): string | null {
   }
 }
 
+type YtPlayerInstance = {
+  playVideo: () => void;
+  pauseVideo: () => void;
+  seekTo: (seconds: number, allowSeekAhead: boolean) => void;
+  getCurrentTime: () => number;
+  getPlayerState: () => number;
+  getDuration: () => number;
+  isMuted: () => boolean;
+  mute: () => void;
+  unMute: () => void;
+  destroy: () => void;
+};
+
 declare global {
   interface Window {
     YT?: {
-      Player: new (
-        element: HTMLElement | string,
-        config: Record<string, unknown>,
-      ) => {
-        playVideo: () => void;
-        pauseVideo: () => void;
-        seekTo: (seconds: number, allowSeekAhead: boolean) => void;
-        getCurrentTime: () => number;
-        getPlayerState: () => number;
-        destroy: () => void;
-      };
+      Player: new (element: HTMLElement, config: Record<string, unknown>) => YtPlayerInstance;
       PlayerState: {
         UNSTARTED: number;
         ENDED: number;
@@ -55,12 +63,12 @@ declare global {
 
 let apiPromise: Promise<void> | null = null;
 
-/** Load the YouTube IFrame API exactly once. */
+/** Load the IFrame API once and resolve when `YT.Player` is usable. */
 export function loadYouTubeApi(): Promise<void> {
   if (apiPromise) {
     return apiPromise;
   }
-  apiPromise = new Promise((resolve) => {
+  apiPromise = new Promise((resolve, reject) => {
     if (window.YT?.Player) {
       resolve();
       return;
@@ -72,6 +80,11 @@ export function loadYouTubeApi(): Promise<void> {
     };
     const script = document.createElement("script");
     script.src = "https://www.youtube.com/iframe_api";
+    script.async = true;
+    script.onerror = () => {
+      apiPromise = null;
+      reject(new Error("The YouTube player could not be loaded."));
+    };
     document.body.appendChild(script);
   });
   return apiPromise;

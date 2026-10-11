@@ -49,9 +49,13 @@ services:
           property: connectionString
 
       # Exact client URL, scheme + host, NO trailing slash. Used for CORS and
-      # for the WebSocket Origin check. Set this to your Vercel URL.
+      # for the WebSocket Origin check.
+      #
+      # This is the Vercel client: https://watch-party-rosy-pi.vercel.app
+      # To add more origins (a second preview domain), append with a comma:
+      #   https://watch-party-rosy-pi.vercel.app,https://other.vercel.app
       - key: ALLOWED_ORIGINS
-        sync: false
+        value: https://watch-party-rosy-pi.vercel.app
 
       # A missing Origin header is rejected before the socket is accepted (S-3).
       # This is local-only; true in production is a cross-site WebSocket hijack.
